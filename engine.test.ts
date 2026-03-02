@@ -1,5 +1,5 @@
 import { describe, it, expect } from "bun:test";
-import { FilterEngine } from ".";
+import { FilterEngine } from "./src";
 
 type LogEntry = {
     type: string;

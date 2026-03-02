@@ -8,7 +8,9 @@
     "jsx": "react-jsx",
     "allowJs": true,
     "types": ["bun-types"],
-
+    "paths": {
+      "@/*":  ["./src/*"]
+    },
     // Bundler mode
     "moduleResolution": "bundler",
     "allowImportingTsExtensions": true,

@@ -163,7 +163,7 @@ const data: SampleItem[] = [
         },
     },
 ];
-import { FilterEngine } from ".";
+import { FilterEngine } from "./src";
 
 
 
