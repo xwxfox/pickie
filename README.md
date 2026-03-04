@@ -1,4 +1,4 @@
-# picky
+# pickie
 
 smol lil filter engine focussing on perf optimizations and nice sugary DX for arrays of *structured* objects.  
 > WIP, but functional. Still trying to find more fast-paths & micro optimizations uwu  
@@ -26,6 +26,7 @@ note: this is built for bun + typescript, zero runtime deps.
 - between, dateBefore, dateAfter, dateBetween, dateEquals
 - custom predicates if u wanna do cursed stuff manually
 - ordering, limiting, pagination, grouping
+- fuzzy search + tagger pipeline (optional + typed)
 
 > im still thinking of other stuff to add/improve - check NOTES.md (though its not really formatted for "others" and more for my ideas n stuff)
 
@@ -33,26 +34,29 @@ note: this is built for bun + typescript, zero runtime deps.
 ## owo
 
 ```ts
-import { FilterEngine } from ".";
+import { Engine, IngressEngine } from ".";
 
-const result = FilterEngine.from(data)
+const result = Engine.from(IngressEngine.from(data))
   .equals("meta.owner.name", "Alice")
   .dateBetween("created", "2024-01-01", "2024-02-01")
   .nested("logs", q => q.equals("type", "CREDIT_MAX_EXCEEDED"))
+  .out()
   .orderBy("score", { direction: "desc" })
   .limit(10)
   .result();
 ```
 
 ```ts
-const grouped = FilterEngine.from(data)
+const grouped = Engine.from(IngressEngine.from(data))
   .equals("active", true)
+  .out()
   .orderBy("name")
   .groupBy("meta.owner.name");
 
-const cursor = FilterEngine.from(data)
+const cursor = Engine.from(IngressEngine.from(data))
+  .out()
   .orderByDate("created")
-  .resultPaginated({ pageSize: 50, total: "lazy" });
+  .paginate({ pageSize: 50, total: "lazy" });
 
 cursor.next();
 ```
@@ -64,6 +68,15 @@ All fields + values are fully typesafe automatically
 - Wrong value types fail at compile time
 - Dates are gated behind date methods
 - You can’t accidentally deep-chain arrays into oblivion
+
+
+## examples
+
+- `examples/basic-filtering.ts` predicate chaining + nested array filter
+- `examples/search-fuzzy.ts` fuzzy search + score metadata
+- `examples/search-tagger.ts` tagger rules + tag filters
+- `examples/grouping-pagination.ts` ordering, paging, grouping
+- `examples/chains.ts` reusable chains + schema inference
 
 
 ## perf
@@ -295,7 +308,7 @@ why?
 ## configure
 
 ```ts
-FilterEngine.configure({
+IngressEngine.configure({
   sharedCache: true,
   maxDateCache: 2048,
   maxPathCache: 2048,
@@ -306,7 +319,7 @@ FilterEngine.configure({
 - `maxDateCache` -> cap for date parse cache
 - `maxPathCache` -> cap for dot-path cache
 
-`FilterEngine.clearCaches()` clears shared caches manually if needed.
+`IngressEngine.clearCaches()` clears shared caches manually if needed.
 
 
 
@@ -318,11 +331,19 @@ bun test
 
 
 
-## files
+## run tests
 
-- `index.ts` main engine + types + cursed type gymnastics
-- `engine.test.ts` coverage for weird edges + date behavior
-- `example.ts` small usage sandbox
+```sh
+bun test
+```
+
+
+
+## run benchmrks (linux/mac)
+
+```sh
+bun run bench
+```
 
 
 
