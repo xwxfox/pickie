@@ -163,31 +163,34 @@ const data: SampleItem[] = [
         },
     },
 ];
-import { FilterEngine } from "./src";
+import { Engine, IngressEngine } from "../src";
 
+const input = IngressEngine.from(data)
 
-
-const filter = FilterEngine.from(data);
+const filter = Engine.from(input);
 const res = filter.in("HandledBy.SalesRep", ["PAW", "OWO"])
-    .nested("Logs", p => 
+    .nested("Logs", p =>
         p.arraySome("tags", tag => tag === "x")
     )
     .dateBetween("created", "2026-01-01", "2026-02-31")
+    .out()
     .orderByDate("created", { direction: "desc" })
     .limit(5)
     .result();
 
 console.dir(res, { depth: null });
 
-const grouped = FilterEngine.from(data)
+const grouped = filter
     .equals("active", true)
+    .out()
     .groupBy("HandledBy.SalesRep");
 
 console.dir(grouped, { depth: null });
 
-const cursor = FilterEngine.from(data)
+const cursor = filter
+    .out()
     .orderByDate("created", { direction: "desc" })
-    .resultPaginated({ pageSize: 2, total: "lazy" });
+    .paginate({ pageSize: 2, total: "lazy" });
 
 console.dir(cursor.data, { depth: null });
 console.dir(cursor.next().data, { depth: null });

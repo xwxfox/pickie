@@ -1,6 +1,11 @@
 {
   "name": "picky",
   "module": "index.ts",
+  "scripts": {
+    "test": "bun test --coverage",
+    "example": "bun examples/example.ts",
+    "bench": "./scripts/compare.sh"
+  },
   "devDependencies": {
     "@types/bun": "latest"
   },

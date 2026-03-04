@@ -1,5 +1,5 @@
 import type { ResolvePredicate, ResolveValue } from "@/types";
-import { toTimestamp } from "@/core/cache";
+import { toTimestamp } from "@/core/shared/cache";
 
 export function createDateEqualsPredicate(
     parseIsoDate: (value: string) => number | null,

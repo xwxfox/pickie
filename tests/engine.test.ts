@@ -1,5 +1,21 @@
 import { describe, it, expect } from "bun:test";
-import { FilterEngine } from "./src";
+import { Engine, IngressEngine } from "../src";
+import { QueryChain, ChainRegistry, createChain, compileChain } from "@/core/engine/chains/chain";
+import { createComparePredicate } from "@/core/engine/predicates/compare";
+import { createBetweenPredicate } from "@/core/engine/predicates/range";
+import { compareNullable, createComparator, heapPush, heapReplaceRoot } from "@/core/engine/compare";
+import { createCacheState, getSegments, toTimestamp } from "@/core/shared/cache";
+import {
+    someResolvedWithSegments,
+    resolveFirstWithSegments,
+    forEachResolvedWithSegments,
+    everyResolvedWithSegments,
+    pathExistsWithSegments,
+    resolveOrderValueWithSegments,
+} from "@/core/shared/path";
+import { Schema } from "@/io/schema";
+import { ExecutionEngine } from "@/core/engine/executor";
+import type { ResolveObject } from "@/types/core";
 
 type LogEntry = {
     type: string;
@@ -167,27 +183,27 @@ const data: SampleItem[] = [
     },
 ];
 
-const makeEngine = () => FilterEngine.from(data);
+const makeEngine = () => Engine.from(IngressEngine.from(data));
+const from = <T extends Record<string, unknown>>(items: readonly T[]) => Engine.from(IngressEngine.from(items));
 
-describe("FilterEngine fast - core basics", () => {
+describe("Engine - core basics", () => {
     it("returns all items with no filters", () => {
-        const result = makeEngine().result().map(item => item.id);
+        const result = makeEngine().out().result().map(item => item.id);
         expect(result).toEqual([1, 2, 3, 4]);
     });
 
     it("compile matches result", () => {
         const engine = makeEngine().equals("active", true);
-        const predicate = engine.compile();
-        expect(data.filter(predicate).map(item => item.id)).toEqual([1, 3, 4]);
-        expect(engine.result().map(item => item.id)).toEqual([1, 3, 4]);
+        const result = engine.out().result().map(item => item.id);
+        expect(result).toEqual([1, 3, 4]);
     });
 });
 
-describe("FilterEngine fast - logical grouping", () => {
+describe("Engine - logical grouping", () => {
     it("and groups predicates", () => {
         const result = makeEngine()
             .and(q => q.equals("active", true).greaterThan("score", 8))
-            .result()
+            .out().result()
             .map(item => item.id);
         expect(result).toEqual([1, 4]);
     });
@@ -196,7 +212,7 @@ describe("FilterEngine fast - logical grouping", () => {
         const result = makeEngine()
             .equals("id", 1)
             .or(q => q.equals("id", 2))
-            .result()
+            .out().result()
             .map(item => item.id);
         expect(result).toEqual([1, 2]);
     });
@@ -204,7 +220,7 @@ describe("FilterEngine fast - logical grouping", () => {
     it("or on empty engine uses group", () => {
         const result = makeEngine()
             .or(q => q.equals("id", 2))
-            .result()
+            .out().result()
             .map(item => item.id);
         expect(result).toEqual([2]);
     });
@@ -212,17 +228,17 @@ describe("FilterEngine fast - logical grouping", () => {
     it("not negates group", () => {
         const result = makeEngine()
             .not(q => q.equals("id", 1))
-            .result()
+            .out().result()
             .map(item => item.id);
         expect(result).toEqual([2, 3, 4]);
     });
 });
 
-describe("FilterEngine fast - equals and notEquals", () => {
+describe("Engine - equals and notEquals", () => {
     it("matches nested path values", () => {
         const result = makeEngine()
             .equals("meta.owner.name", "Alice")
-            .result()
+            .out().result()
             .map(item => item.id);
         expect(result).toEqual([1]);
     });
@@ -230,7 +246,7 @@ describe("FilterEngine fast - equals and notEquals", () => {
     it("matches array values at leaf", () => {
         const result = makeEngine()
             .equals("flags", "green")
-            .result()
+            .out().result()
             .map(item => item.id);
         expect(result).toEqual([2]);
     });
@@ -238,7 +254,7 @@ describe("FilterEngine fast - equals and notEquals", () => {
     it("matches date-like strings by strict equality", () => {
         const result = makeEngine()
             .equals("label", "2024-01-01")
-            .result()
+            .out().result()
             .map(item => item.id);
         expect(result).toEqual([1, 4]);
     });
@@ -246,7 +262,7 @@ describe("FilterEngine fast - equals and notEquals", () => {
     it("notEquals is strict negation of equals for arrays", () => {
         const result = makeEngine()
             .notEquals("flags", "red")
-            .result()
+            .out().result()
             .map(item => item.id);
         expect(result).toEqual([2, 3]);
     });
@@ -254,7 +270,7 @@ describe("FilterEngine fast - equals and notEquals", () => {
     it("supports date equality across Date and ISO string", () => {
         const result = makeEngine()
             .dateEquals("created", new Date("2024-01-02T00:00:00.000Z"))
-            .result()
+            .out().result()
             .map(item => item.id);
         expect(result).toEqual([2]);
     });
@@ -262,33 +278,33 @@ describe("FilterEngine fast - equals and notEquals", () => {
     it("compares Date fields to numeric timestamps", () => {
         const result = makeEngine()
             .dateEquals("created", new Date("2024-01-01T00:00:00.000Z").getTime())
-            .result()
+            .out().result()
             .map(item => item.id);
         expect(result).toEqual([1, 4]);
     });
 
     it("keeps reference equality for objects", () => {
         const metaRef = data[0]!.meta;
-        const hit = makeEngine().equals("meta", metaRef).result().map(item => item.id);
+        const hit = makeEngine().equals("meta", metaRef).out().result().map(item => item.id);
         expect(hit).toEqual([1]);
 
-        const miss = makeEngine().equals("meta", { owner: { name: "Alice" } }).result().map(item => item.id);
+        const miss = makeEngine().equals("meta", { owner: { name: "Alice" } }).out().result().map(item => item.id);
         expect(miss).toEqual([]);
     });
 });
 
-describe("FilterEngine fast - comparison operators", () => {
+describe("Engine - comparison operators", () => {
     it("handles greater/less variants with numbers", () => {
-        expect(makeEngine().greaterThan("score", 9).result().map(item => item.id)).toEqual([1, 2, 4]);
-        expect(makeEngine().greaterThanOrEqual("score", 10).result().map(item => item.id)).toEqual([1, 2, 4]);
-        expect(makeEngine().lessThan("score", 10).result().map(item => item.id)).toEqual([3]);
-        expect(makeEngine().lessThanOrEqual("score", 10).result().map(item => item.id)).toEqual([1, 3, 4]);
+        expect(makeEngine().greaterThan("score", 9).out().result().map(item => item.id)).toEqual([1, 2, 4]);
+        expect(makeEngine().greaterThanOrEqual("score", 10).out().result().map(item => item.id)).toEqual([1, 2, 4]);
+        expect(makeEngine().lessThan("score", 10).out().result().map(item => item.id)).toEqual([3]);
+        expect(makeEngine().lessThanOrEqual("score", 10).out().result().map(item => item.id)).toEqual([1, 3, 4]);
     });
 
     it("supports between for numbers", () => {
         const result = makeEngine()
             .between("score", 6, 20)
-            .result()
+            .out().result()
             .map(item => item.id);
         expect(result).toEqual([1, 2, 4]);
     });
@@ -300,7 +316,7 @@ describe("FilterEngine fast - comparison operators", () => {
                 new Date("2024-01-01T00:00:00.000Z"),
                 new Date("2024-01-02T00:00:00.000Z")
             )
-            .result()
+            .out().result()
             .map(item => item.id);
         expect(result).toEqual([1, 2, 4]);
     });
@@ -308,7 +324,7 @@ describe("FilterEngine fast - comparison operators", () => {
     it("dateBetween requires both bounds to be date-ish", () => {
         const result = makeEngine()
             .dateBetween("created", "2024-01-01T00:00:00.000Z", "not-a-date")
-            .result()
+            .out().result()
             .map(item => item.id);
         expect(result).toEqual([]);
     });
@@ -316,78 +332,78 @@ describe("FilterEngine fast - comparison operators", () => {
     it("compares strings lexicographically", () => {
         const result = makeEngine()
             .greaterThan("name", "Beta")
-            .result()
+            .out().result()
             .map(item => item.id);
         expect(result).toEqual([3, 4]);
     });
 });
 
-describe("FilterEngine fast - membership and string operations", () => {
+describe("Engine - membership and string operations", () => {
     it("supports in and notIn", () => {
-        expect(makeEngine().in("id", [1, 3]).result().map(item => item.id)).toEqual([1, 3]);
-        expect(makeEngine().notIn("id", [1, 2]).result().map(item => item.id)).toEqual([3, 4]);
-        expect(makeEngine().notIn("flags", ["red"]).result().map(item => item.id)).toEqual([2, 3]);
+        expect(makeEngine().in("id", [1, 3]).out().result().map(item => item.id)).toEqual([1, 3]);
+        expect(makeEngine().notIn("id", [1, 2]).out().result().map(item => item.id)).toEqual([3, 4]);
+        expect(makeEngine().notIn("flags", ["red"]).out().result().map(item => item.id)).toEqual([2, 3]);
     });
 
     it("supports contains, startsWith, endsWith", () => {
-        expect(makeEngine().contains("name", "ph").result().map(item => item.id)).toEqual([1]);
-        expect(makeEngine().startsWith("name", "be", true).result().map(item => item.id)).toEqual([2]);
-        expect(makeEngine().endsWith("name", "MA", true).result().map(item => item.id)).toEqual([3]);
+        expect(makeEngine().contains("name", "ph").out().result().map(item => item.id)).toEqual([1]);
+        expect(makeEngine().startsWith("name", "be", true).out().result().map(item => item.id)).toEqual([2]);
+        expect(makeEngine().endsWith("name", "MA", true).out().result().map(item => item.id)).toEqual([3]);
     });
 
     it("supports matches with regex and resets /g state", () => {
-        expect(makeEngine().matches("name", /^A/).result().map(item => item.id)).toEqual([1]);
-        expect(makeEngine().matches("name", /a/g).result().map(item => item.id)).toEqual([1, 2, 3, 4]);
+        expect(makeEngine().matches("name", /^A/).out().result().map(item => item.id)).toEqual([1]);
+        expect(makeEngine().matches("name", /a/g).out().result().map(item => item.id)).toEqual([1, 2, 3, 4]);
     });
 
     it("matches array leaf values", () => {
         const result = makeEngine()
             .equals("metrics.values", 2)
-            .result()
+            .out().result()
             .map(item => item.id);
         expect(result).toEqual([1]);
     });
 });
 
-describe("FilterEngine fast - null and existence semantics", () => {
+describe("Engine - null and existence semantics", () => {
     it("handles isNull and isNotNull", () => {
-        expect(makeEngine().isNull("note").result().map(item => item.id)).toEqual([1]);
-        expect(makeEngine().valueNotNull("note").result().map(item => item.id)).toEqual([2]);
+        expect(makeEngine().isNull("note").out().result().map(item => item.id)).toEqual([1]);
+        expect(makeEngine().valueNotNull("note").out().result().map(item => item.id)).toEqual([2]);
     });
 
     it("checks exists for defined values", () => {
-        expect(makeEngine().pathExists("note").result().map(item => item.id)).toEqual([1, 2, 4]);
-        expect(makeEngine().pathExists("misc.code").result().map(item => item.id)).toEqual([1]);
-        expect(makeEngine().pathExists("misc.nested.value").result().map(item => item.id)).toEqual([1, 4]);
+        expect(makeEngine().pathExists("note").out().result().map(item => item.id)).toEqual([1, 2, 4]);
+        expect(makeEngine().pathExists("misc.code").out().result().map(item => item.id)).toEqual([1]);
+        expect(makeEngine().pathExists("misc.nested.value").out().result().map(item => item.id)).toEqual([1, 4]);
     });
 
     it("supports pathExistsNullable", () => {
-        expect(makeEngine().pathExistsNullable("note").result().map(item => item.id)).toEqual([1, 2]);
-        expect(makeEngine().pathExistsNullable("misc.nested.value").result().map(item => item.id)).toEqual([1, 4]);
+        expect(makeEngine().pathExistsNullable("note").out().result().map(item => item.id)).toEqual([1, 2]);
+        expect(makeEngine().pathExistsNullable("misc.nested.value").out().result().map(item => item.id)).toEqual([1, 4]);
     });
 
     it("treats undefined as not-null false", () => {
-        expect(makeEngine().valueNotNull("meta.owner.nickname").result().map(item => item.id)).toEqual([2]);
+        expect(makeEngine().valueNotNull("meta.owner.nickname").out().result().map(item => item.id)).toEqual([2]);
     });
 });
 
-describe("FilterEngine fast - array helpers", () => {
+describe("Engine - array helpers", () => {
     it("supports arraySome, arrayEvery, arrayNone", () => {
-        expect(makeEngine().arraySome("flags", v => v === "green").result().map(item => item.id)).toEqual([2]);
-        expect(makeEngine().arrayEvery("flags", v => v.length >= 4).result().map(item => item.id)).toEqual([2]);
-        expect(makeEngine().arrayNone("flags", v => v.length < 4).result().map(item => item.id)).toEqual([2, 3]);
+        expect(makeEngine().arraySome("flags", v => v === "green").out().result().map(item => item.id)).toEqual([2]);
+        expect(makeEngine().arrayEvery("flags", v => v.length >= 4).out().result().map(item => item.id)).toEqual([2]);
+        expect(makeEngine().arrayNone("flags", v => v.length < 4).out().result().map(item => item.id)).toEqual([2, 3]);
     });
 
     it("arrayEvery fails on empty arrays", () => {
-        expect(makeEngine().arrayEvery("flags", () => true).result().map(item => item.id)).toEqual([1, 2, 4]);
+        expect(makeEngine().arrayEvery("flags", () => true).out().result().map(item => item.id)).toEqual([1, 2, 4]);
     });
 });
 
-describe("FilterEngine fast - nested arrays and paths", () => {
+describe("Engine - nested arrays and paths", () => {
     it("supports nested filtering for arrays of objects", () => {
         const result = makeEngine()
             .nested("Logs", q => q.equals("type", "CREDIT_MAX_EXCEEDED"))
-            .result()
+            .out().result()
             .map(item => item.id);
         expect(result).toEqual([1, 4]);
     });
@@ -395,7 +411,7 @@ describe("FilterEngine fast - nested arrays and paths", () => {
     it("supports a single array segment in paths", () => {
         const result = makeEngine()
             .equals("Logs.type", "CREDIT_MAX_EXCEEDED")
-            .result()
+            .out().result()
             .map(item => item.id);
         expect(result).toEqual([1, 4]);
     });
@@ -403,7 +419,7 @@ describe("FilterEngine fast - nested arrays and paths", () => {
     it("matches nested date comparisons in array objects", () => {
         const result = makeEngine()
             .nested("Logs", q => q.dateAfterOrEqual("when", new Date("2024-01-03T00:00:00.000Z")))
-            .result()
+            .out().result()
             .map(item => item.id);
         expect(result).toEqual([1, 2, 4]);
     });
@@ -411,30 +427,30 @@ describe("FilterEngine fast - nested arrays and paths", () => {
     it("supports nested array predicates on array fields", () => {
         const result = makeEngine()
             .nested("Logs", q => q.arraySome("tags", tag => tag === "x"))
-            .result()
+            .out().result()
             .map(item => item.id);
         expect(result).toEqual([1]);
     });
 });
 
-describe("FilterEngine fast - aggressive edge cases", () => {
+describe("Engine - aggressive edge cases", () => {
     it("handles nullish segments without throwing", () => {
         const result = makeEngine()
             .equals("misc.nested.value", "ok")
-            .result()
+            .out().result()
             .map(item => item.id);
         expect(result).toEqual([4]);
     });
 
     it("handles null value comparisons", () => {
-        expect(makeEngine().equals("note", null).result().map(item => item.id)).toEqual([1]);
-        expect(makeEngine().notEquals("note", null).result().map(item => item.id)).toEqual([2, 3, 4]);
+        expect(makeEngine().equals("note", null).out().result().map(item => item.id)).toEqual([1]);
+        expect(makeEngine().notEquals("note", null).out().result().map(item => item.id)).toEqual([2, 3, 4]);
     });
 
     it("handles empty resolvers for arrays", () => {
         const result = makeEngine()
             .equals("Logs.type", "MISSING")
-            .result()
+            .out().result()
             .map(item => item.id);
         expect(result).toEqual([]);
     });
@@ -442,7 +458,7 @@ describe("FilterEngine fast - aggressive edge cases", () => {
     it("handles exists on optional nested paths", () => {
         const result = makeEngine()
             .pathExists("misc.nested.value")
-            .result()
+            .out().result()
             .map(item => item.id);
         expect(result).toEqual([1, 4]);
     });
@@ -454,7 +470,7 @@ describe("FilterEngine fast - aggressive edge cases", () => {
             .greaterThanOrEqual("score", 10)
             .not(q => q.equals("name", "Gamma"));
 
-        const result = engine.result().map(item => item.id);
+        const result = engine.out().result().map(item => item.id);
         expect(result).toEqual([1, 4]);
     });
 
@@ -463,28 +479,27 @@ describe("FilterEngine fast - aggressive edge cases", () => {
         for (let i = 0; i < 20; i++) {
             engine = engine.and(q => q.equals("active", true));
         }
-        expect(engine.result().map(item => item.id)).toEqual([1, 3, 4]);
-        expect(engine.compile()(data[0]!)).toEqual(true);
+        expect(engine.out().result().map(item => item.id)).toEqual([1, 3, 4]);
     });
 });
 
-describe("FilterEngine fast - additional edge coverage", () => {
+describe("Engine - additional edge coverage", () => {
     it("covers configure + clearCaches with shared cache enabled", () => {
-        FilterEngine.configure({
+        IngressEngine.configure({
             sharedCache: true,
             maxDateCache: 8,
             maxPathCache: 8,
         });
 
-        const result = FilterEngine.from(data)
+        const result = from(data)
             .equals("id", 1)
-            .result()
+            .out().result()
             .map(item => item.id);
 
         expect(result).toEqual([1]);
-        FilterEngine.clearCaches();
+        IngressEngine.clearCaches();
 
-        FilterEngine.configure({
+        IngressEngine.configure({
             sharedCache: false,
             maxDateCache: 2048,
             maxPathCache: 2048,
@@ -492,15 +507,15 @@ describe("FilterEngine fast - additional edge coverage", () => {
     });
 
     it("covers contains, startsWith, endsWith without ignoreCase", () => {
-        expect(makeEngine().contains("name", "Al", false).result().map(item => item.id)).toEqual([1]);
-        expect(makeEngine().startsWith("name", "Al", false).result().map(item => item.id)).toEqual([1]);
-        expect(makeEngine().endsWith("name", "ma", false).result().map(item => item.id)).toEqual([3]);
+        expect(makeEngine().contains("name", "Al", false).out().result().map(item => item.id)).toEqual([1]);
+        expect(makeEngine().startsWith("name", "Al", false).out().result().map(item => item.id)).toEqual([1]);
+        expect(makeEngine().endsWith("name", "ma", false).out().result().map(item => item.id)).toEqual([3]);
     });
 
     it("covers contains with ignoreCase true", () => {
         const result = makeEngine()
             .contains("name", "AL", true)
-            .result()
+            .out().result()
             .map(item => item.id);
         expect(result).toEqual([1]);
     });
@@ -509,28 +524,28 @@ describe("FilterEngine fast - additional edge coverage", () => {
         expect(
             makeEngine()
                 .dateAfter("created", "2024-01-01T00:00:00.000Z")
-                .result()
+                .out().result()
                 .map(item => item.id)
         ).toEqual([2]);
 
         expect(
             makeEngine()
                 .dateBefore("created", "2024-01-02T00:00:00.000Z")
-                .result()
+                .out().result()
                 .map(item => item.id)
         ).toEqual([1, 4]);
 
         expect(
             makeEngine()
                 .dateBeforeOrEqual("created", "2024-01-02T00:00:00.000Z")
-                .result()
+                .out().result()
                 .map(item => item.id)
         ).toEqual([1, 2, 4]);
 
         expect(
             makeEngine()
                 .dateAfter("created", "not-a-date")
-                .result()
+                .out().result()
                 .map(item => item.id)
         ).toEqual([]);
     });
@@ -538,7 +553,7 @@ describe("FilterEngine fast - additional edge coverage", () => {
     it("covers between for strings, bigints, and dates", () => {
         const stringBetween = makeEngine()
             .between("name", "Beta", "Delta")
-            .result()
+            .out().result()
             .map(item => item.id);
         expect(stringBetween).toEqual([2, 4]);
 
@@ -548,21 +563,21 @@ describe("FilterEngine fast - additional edge coverage", () => {
             { id: 3, big: 5n },
         ];
 
-        const bigResult = FilterEngine.from(bigData)
+        const bigResult = from(bigData)
             .between("big", 2n, 9n)
-            .result()
+            .out().result()
             .map(item => item.id);
         expect(bigResult).toEqual([3]);
 
-        const dateData: any[] = [
+        const dateData: Array<{ id: number; when: Date }> = [
             { id: 1, when: new Date("2024-01-01T00:00:00.000Z") },
             { id: 2, when: new Date("2024-01-03T00:00:00.000Z") },
             { id: 3, when: new Date("invalid") },
         ];
 
-        const dateResult = FilterEngine.from(dateData)
-            .between("when", new Date("2024-01-01T00:00:00.000Z"), new Date("2024-01-02T00:00:00.000Z"))
-            .result()
+        const dateResult = from(dateData)
+            .dateBetween("when", new Date("2024-01-01T00:00:00.000Z"), new Date("2024-01-02T00:00:00.000Z"))
+            .out().result()
             .map(item => item.id);
         expect(dateResult).toEqual([1]);
     });
@@ -570,19 +585,19 @@ describe("FilterEngine fast - additional edge coverage", () => {
     it("returns no matches when between bounds are NaN", () => {
         const result = makeEngine()
             .between("score", Number.NaN, 10)
-            .result()
+            .out().result()
             .map(item => item.id);
         expect(result).toEqual([]);
     });
 });
 
-describe("FilterEngine fast - extreme break tests", () => {
+describe("Engine - extreme break tests", () => {
     it("ignores second array segment for matches but pathExists still works", () => {
         const equalsResult = makeEngine()
             .nested("Logs", q => q
                 .equals("tags", "x")
             )
-            .result()
+            .out().result()
             .map(item => item.id);
         expect(equalsResult).toEqual([1]);
 
@@ -590,7 +605,7 @@ describe("FilterEngine fast - extreme break tests", () => {
             .nested("Logs", q => q
                 .pathExists("tags")
             )
-            .result()
+            .out().result()
             .map(item => item.id);
         expect(existsResult).toEqual([1, 2, 4]);
     });
@@ -598,13 +613,13 @@ describe("FilterEngine fast - extreme break tests", () => {
     it("distinguishes pathExists from pathExistsNullable on undefined", () => {
         const existsResult = makeEngine()
             .pathExists("meta.owner.nickname")
-            .result()
+            .out().result()
             .map(item => item.id);
         expect(existsResult).toEqual([1, 2, 4]);
 
         const existsNullableResult = makeEngine()
             .pathExistsNullable("meta.owner.nickname")
-            .result()
+            .out().result()
             .map(item => item.id);
         expect(existsNullableResult).toEqual([1, 2]);
     });
@@ -612,19 +627,19 @@ describe("FilterEngine fast - extreme break tests", () => {
     it("applies array helpers to non-array leaves safely", () => {
         const someResult = makeEngine()
             .arraySome("meta", meta => (meta).owner?.name === "Alice")
-            .result()
+            .out().result()
             .map(item => item.id);
         expect(someResult).toEqual([1]);
 
         const everyResult = makeEngine()
             .arrayEvery("meta", meta => Boolean((meta).owner?.name))
-            .result()
+            .out().result()
             .map(item => item.id);
         expect(everyResult).toEqual([1, 2, 3, 4]);
 
         const noneResult = makeEngine()
             .arrayNone("meta", meta => (meta).owner?.name === "Alice")
-            .result()
+            .out().result()
             .map(item => item.id);
         expect(noneResult).toEqual([2, 3, 4]);
     });
@@ -632,7 +647,7 @@ describe("FilterEngine fast - extreme break tests", () => {
     it("treats notIn with empty list as always true", () => {
         const result = makeEngine()
             .notIn("flags", [])
-            .result()
+            .out().result()
             .map(item => item.id);
         expect(result).toEqual([1, 2, 3, 4]);
     });
@@ -643,15 +658,15 @@ describe("FilterEngine fast - extreme break tests", () => {
             { id: 2, score: 1 },
         ];
 
-        const equalsNaN = FilterEngine.from(weirdData)
+        const equalsNaN = from(weirdData)
             .equals("score", Number.NaN)
-            .result()
+            .out().result()
             .map(item => item.id);
         expect(equalsNaN).toEqual([]);
 
-        const notEqualsNaN = FilterEngine.from(weirdData)
+        const notEqualsNaN = from(weirdData)
             .notEquals("score", Number.NaN)
-            .result()
+            .out().result()
             .map(item => item.id);
         expect(notEqualsNaN).toEqual([1, 2]);
     });
@@ -660,7 +675,7 @@ describe("FilterEngine fast - extreme break tests", () => {
         const result = makeEngine()
             //@ts-expect-error - ts will complain as expected bc we try to compare a number to a string.
             .greaterThan("name", 1)
-            .result()
+            .out().result()
             .map((item: SampleItem) => item.id);
         expect(result).toEqual([]);
     });
@@ -670,7 +685,7 @@ describe("FilterEngine fast - extreme break tests", () => {
         const max = new Date("2024-01-02T00:00:00.000Z").getTime();
         const result = makeEngine()
             .dateBetween("created", min, max)
-            .result()
+            .out().result()
             .map(item => item.id);
         expect(result).toEqual([1, 2, 4]);
     });
@@ -678,7 +693,7 @@ describe("FilterEngine fast - extreme break tests", () => {
     it("strips sticky regex flags in matches", () => {
         const result = makeEngine()
             .matches("name", /a/y)
-            .result()
+            .out().result()
             .map(item => item.id);
         expect(result).toEqual([1, 2, 3, 4]);
     });
@@ -687,14 +702,14 @@ describe("FilterEngine fast - extreme break tests", () => {
         const equalsResult = makeEngine()
             //@ts-expect-error - ts will complain since paths are typechecked and we test invalid path here
             .equals("misc.missing.value", "x")
-            .result()
+            .out().result()
             .map(item => item.id);
         expect(equalsResult).toEqual([]);
 
         const existsResult = makeEngine()
             //@ts-expect-error - ts will complain since paths are typechecked and we test invalid path here
             .pathExists("misc.missing.value")
-            .result()
+            .out().result()
             .map(item => item.id);
         expect(existsResult).toEqual([]);
     });
@@ -702,7 +717,7 @@ describe("FilterEngine fast - extreme break tests", () => {
     it("nested filters handle empty arrays safely", () => {
         const result = makeEngine()
             .nested("Logs", q => q.equals("type", "OTHER"))
-            .result()
+            .out().result()
             .map(item => item.id);
         expect(result).toEqual([2]);
     });
@@ -711,20 +726,20 @@ describe("FilterEngine fast - extreme break tests", () => {
         const equalsResult = makeEngine()
             // @ts-expect-error - this path violates one-array rule
             .equals("Logs.tags", "x")
-            .result()
+            .out().result()
             .map(item => item.id);
         expect(equalsResult).toEqual([]);
 
         const existsResult = makeEngine()
             // @ts-expect-error - this path violates one-array rule
             .pathExists("Logs.tags")
-            .result()
+            .out().result()
             .map(item => item.id);
         expect(existsResult).toEqual([1, 2, 4]);
     });
 });
 
-describe("FilterEngine fast - order stability and offsets", () => {
+describe("Engine - order stability and offsets", () => {
     it("keeps stable order when primary keys tie", () => {
         const stableData = [
             { id: 1, score: 5, name: "b" },
@@ -732,8 +747,8 @@ describe("FilterEngine fast - order stability and offsets", () => {
             { id: 3, score: 5, name: "c" },
         ];
 
-        const result = FilterEngine.from(stableData)
-            .orderBy("score")
+        const result = Engine.from(IngressEngine.from(stableData))
+            .out().orderBy("score")
             .result()
             .map(item => item.id);
         expect(result).toEqual([1, 2, 3]);
@@ -747,8 +762,8 @@ describe("FilterEngine fast - order stability and offsets", () => {
             { id: 4, score: 2, name: "a", label: "a" },
         ];
 
-        const result = FilterEngine.from(items)
-            .orderBy("score")
+        const result = Engine.from(IngressEngine.from(items))
+            .out().orderBy("score")
             .thenBy("name")
             .thenBy("label")
             .result()
@@ -764,14 +779,14 @@ describe("FilterEngine fast - order stability and offsets", () => {
             { id: 4, name: null },
         ];
 
-        const first = FilterEngine.from(items)
-            .orderBy("name", { nulls: "first" })
+        const first = Engine.from(IngressEngine.from(items))
+            .out().orderBy("name", { nulls: "first" })
             .result()
             .map(item => item.id);
         expect(first).toEqual([2, 4, 3, 1]);
 
-        const last = FilterEngine.from(items)
-            .orderBy("name")
+        const last = Engine.from(IngressEngine.from(items))
+            .out().orderBy("name")
             .result()
             .map(item => item.id);
         expect(last).toEqual([3, 1, 2, 4]);
@@ -796,8 +811,8 @@ describe("FilterEngine fast - order stability and offsets", () => {
             })
             .map(entry => entry.item.id);
 
-        const result = FilterEngine.from(items)
-            .orderBy("score")
+        const result = Engine.from(IngressEngine.from(items))
+            .out().orderBy("score")
             .thenBy("name")
             .offset(5)
             .limit(10)
@@ -807,17 +822,17 @@ describe("FilterEngine fast - order stability and offsets", () => {
     });
 });
 
-describe("FilterEngine fast - segment fast paths", () => {
+describe("Engine - segment fast paths", () => {
     it("handles two- and three-segment paths consistently", () => {
         const result = makeEngine()
             .equals("HandledBy.SalesRep", "NHR")
-            .result()
+            .out().result()
             .map(item => item.id);
         expect(result).toEqual([1, 4]);
 
         const nestedResult = makeEngine()
             .equals("meta.owner.name", "Bob")
-            .result()
+            .out().result()
             .map(item => item.id);
         expect(nestedResult).toEqual([2]);
     });
@@ -825,13 +840,13 @@ describe("FilterEngine fast - segment fast paths", () => {
     it("matches when leaf is an array at segment 2", () => {
         const result = makeEngine()
             .equals("metrics.values", 2)
-            .result()
+            .out().result()
             .map(item => item.id);
         expect(result).toEqual([1]);
     });
 });
 
-describe("FilterEngine fast - large randomized dataset", () => {
+describe("Engine - large randomized dataset", () => {
     it("keeps ordering and filtering consistent on 12k items", () => {
         type LargeItem = {
             id: number;
@@ -917,10 +932,11 @@ describe("FilterEngine fast - large randomized dataset", () => {
             });
         }
 
-        const engineResult = FilterEngine.from(data)
+        const engineResult = from(data)
             .equals("active", true)
             .greaterThanOrEqual("score", 20)
             .contains("name", "ab", true)
+            .out()
             .orderBy("score")
             .thenBy("name")
             .offset(25)
@@ -971,9 +987,9 @@ describe("FilterEngine fast - large randomized dataset", () => {
 
         expect(engineResult).toEqual(baseline);
 
-        const nestedResult = FilterEngine.from(data)
+        const nestedResult = from(data)
             .nested("Logs", q => q.equals("type", "WARN"))
-            .result()
+            .out().result()
             .map(item => item.id);
 
         const nestedBaseline = data
@@ -982,9 +998,9 @@ describe("FilterEngine fast - large randomized dataset", () => {
 
         expect(nestedResult).toEqual(nestedBaseline);
 
-        const grouped = FilterEngine.from(data)
+        const grouped = from(data)
             .equals("active", true)
-            .groupBy("meta.owner.name");
+            .out().groupBy("meta.owner.name");
 
         const baselineGroups = new Map<string, number>();
         for (const item of data) {
@@ -1000,9 +1016,10 @@ describe("FilterEngine fast - large randomized dataset", () => {
     });
 });
 
-describe("FilterEngine fast - ordering, limiting, pagination, grouping", () => {
+describe("Engine - ordering, limiting, pagination, grouping", () => {
     it("orders ascending with stable ties", () => {
         const result = makeEngine()
+            .out()
             .orderBy("score")
             .result()
             .map(item => item.id);
@@ -1011,6 +1028,7 @@ describe("FilterEngine fast - ordering, limiting, pagination, grouping", () => {
 
     it("orders descending with thenBy", () => {
         const result = makeEngine()
+            .out()
             .orderBy("score", { direction: "desc" })
             .thenBy("name")
             .result()
@@ -1020,6 +1038,7 @@ describe("FilterEngine fast - ordering, limiting, pagination, grouping", () => {
 
     it("orders dates with date resolver", () => {
         const result = makeEngine()
+            .out()
             .orderByDate("created", { direction: "asc" })
             .result()
             .map(item => item.id);
@@ -1029,6 +1048,7 @@ describe("FilterEngine fast - ordering, limiting, pagination, grouping", () => {
     it("applies offset + limit without sorting", () => {
         const result = makeEngine()
             .equals("active", true)
+            .out()
             .offset(1)
             .limit(1)
             .result()
@@ -1038,6 +1058,7 @@ describe("FilterEngine fast - ordering, limiting, pagination, grouping", () => {
 
     it("applies offset + limit after ordering", () => {
         const result = makeEngine()
+            .out()
             .orderBy("name")
             .offset(1)
             .limit(2)
@@ -1049,7 +1070,8 @@ describe("FilterEngine fast - ordering, limiting, pagination, grouping", () => {
     it("paginates without ordering (streaming)", () => {
         const cursor = makeEngine()
             .equals("active", true)
-            .resultPaginated({ pageSize: 2 });
+            .out()
+            .paginate({ pageSize: 2 });
         expect(cursor.data.map(item => item.id)).toEqual([1, 3]);
         expect(cursor.total).toBeUndefined();
 
@@ -1060,8 +1082,9 @@ describe("FilterEngine fast - ordering, limiting, pagination, grouping", () => {
     it("paginates with ordering and total", () => {
         const cursor = makeEngine()
             .equals("active", true)
+            .out()
             .orderBy("name")
-            .resultPaginated({ pageSize: 2, total: "full" });
+            .paginate({ pageSize: 2, total: "full" });
         expect(cursor.data.map(item => item.id)).toEqual([1, 4]);
         expect(cursor.total).toEqual(3);
 
@@ -1073,13 +1096,13 @@ describe("FilterEngine fast - ordering, limiting, pagination, grouping", () => {
     });
 
     it("groups by scalar values", () => {
-        const grouped = makeEngine().groupBy("HandledBy.SalesRep");
+        const grouped = makeEngine().out().groupBy("HandledBy.SalesRep");
         expect(grouped.get("NHR")?.map(item => item.id)).toEqual([1, 4]);
         expect(grouped.get("THS")?.map(item => item.id)).toEqual([3]);
     });
 
     it("groups by array leaf values", () => {
-        const grouped = makeEngine().groupBy("flags");
+        const grouped = makeEngine().out().groupBy("flags");
         expect(grouped.get("red")?.map(item => item.id)).toEqual([1, 4]);
         expect(grouped.get("green")?.map(item => item.id)).toEqual([2]);
         expect(grouped.get("blue")?.map(item => item.id)).toEqual([1]);
@@ -1087,6 +1110,7 @@ describe("FilterEngine fast - ordering, limiting, pagination, grouping", () => {
 
     it("groups after ordering pipeline", () => {
         const grouped = makeEngine()
+            .out()
             .orderBy("name")
             .groupBy("label");
         expect(grouped.get("2024-01-01")?.map(item => item.id)).toEqual([1, 4]);
@@ -1095,12 +1119,325 @@ describe("FilterEngine fast - ordering, limiting, pagination, grouping", () => {
     it("rejects non-sortable paths at compile time", () => {
         makeEngine()
             // @ts-expect-error - cannot sort by object path
-            .orderBy("meta");
+            .out().orderBy("meta");
     });
 
     it("rejects non-groupable paths at compile time", () => {
         makeEngine()
             // @ts-expect-error - cannot group by object path
-            .groupBy("meta");
+            .out().groupBy("meta");
+    });
+});
+
+describe("QueryChain - schema, caching, and registry", () => {
+    it("caches identical plans by hash", () => {
+        const schema = Schema.inline<SampleItem>();
+        const chainA = QueryChain.from(schema, q => q.equals("active", true));
+        const chainB = QueryChain.from(schema, q => q.equals("active", true));
+        expect(chainA.getPlan()).toBe(chainB.getPlan());
+        expect(chainA.getPlan().hash).toEqual(chainB.getPlan().hash);
+        expect(chainA.getPlan().predicates.length).toEqual(chainB.getPlan().predicates.length);
+
+        const chainC = QueryChain.from(schema, q => q.equals("active", false));
+        expect(chainC.getPlan()).toBe(chainA.getPlan());
+        expect(chainC.getPlan().hash).toEqual(chainA.getPlan().hash);
+
+        const ingress = IngressEngine.from(data);
+        expect(chainC.out(ingress).result().map(item => item.id))
+            .toEqual(chainA.out(ingress).result().map(item => item.id));
+
+        const chainD = QueryChain.from(schema, q => q.equals("active", true).equals("score", 10));
+        expect(chainD.getPlan().hash).not.toEqual(chainA.getPlan().hash);
+        expect(chainD.getPlan()).not.toBe(chainA.getPlan());
+    });
+
+    it("builds QueryBuilder from chain and executes with ingress", () => {
+        const schema = Schema.inline<SampleItem>();
+        const chain = QueryChain.from(schema, q => q.equals("active", true).equals("score", 10));
+        const ingress = IngressEngine.from(data);
+        const result = chain.builder(ingress).out().result().map(item => item.id);
+        expect(result).toEqual([1, 4]);
+    });
+
+    it("uses out/execute helpers consistently", () => {
+        const schema = Schema.inline<SampleItem>();
+        const chain = QueryChain.from(schema, q => q.equals("HandledBy.SalesRep", "NHR").equals("active", true));
+        const ingress = IngressEngine.from(data);
+        const outResult = chain.out(ingress).result().map(item => item.id);
+        const execResult = chain.execute(ingress).result().map(item => item.id);
+        expect(outResult).toEqual(execResult);
+        expect(outResult).toEqual([1, 4]);
+    });
+
+    it("supports QueryBuilder.use with compiled chain", () => {
+        const schema = Schema.inline<SampleItem>();
+        const chain = QueryChain.from(schema, q => q.equals("active", true).equals("score", 10));
+        const result = makeEngine()
+            .equals("score", 10)
+            .use(chain)
+            .out().result()
+            .map(item => item.id);
+        expect(result).toEqual([1, 4]);
+    });
+
+    it("chain registry registers, resolves, and removes", () => {
+        const registry = new ChainRegistry<SampleItem>();
+        const active = createChain<SampleItem>((item) => item.active);
+        registry.register("active", compileChain(active));
+
+        expect(registry.has("active")).toEqual(true);
+        expect(registry.names()).toEqual(["active"]);
+        const predicate = registry.get("active");
+        expect(predicate?.(data[0]!)).toEqual(true);
+        expect(predicate?.(data[1]!)).toEqual(false);
+
+        expect(registry.remove("active")).toEqual(true);
+        expect(registry.get("active")).toBeUndefined();
+        registry.clear();
+        expect(registry.names()).toEqual([]);
+    });
+
+    it("reusable chain composition supports and/or/not", () => {
+        const isActive = createChain<SampleItem>((item) => item.active);
+        const isHigh = createChain<SampleItem>((item) => item.score > 15);
+        const combined = isActive.and(isHigh.not());
+
+        const predicate = compileChain(combined);
+        const hits = data.filter(item => predicate(item)).map(item => item.id);
+        expect(hits).toEqual([1, 3, 4]);
+
+        const orPredicate = compileChain(isActive.or(isHigh));
+        const orHits = data.filter(item => orPredicate(item)).map(item => item.id);
+        expect(orHits).toEqual([1, 2, 3, 4]);
+    });
+});
+
+describe("Predicate helpers - compare and range", () => {
+    it("compare predicates reject invalid or mismatched types", () => {
+        const gtDate = createComparePredicate(new Date("invalid"), "gt");
+        expect(gtDate(new Date("2024-01-01T00:00:00.000Z"))).toEqual(false);
+
+        const gtNumber = createComparePredicate(10, "gt");
+        expect(gtNumber(11)).toEqual(true);
+        expect(gtNumber("11")).toEqual(false);
+
+        const gteString = createComparePredicate("m", "gte");
+        expect(gteString("m")).toEqual(true);
+        expect(gteString("a")).toEqual(false);
+
+        const ltBig = createComparePredicate(10n, "lt");
+        expect(ltBig(9n)).toEqual(true);
+        expect(ltBig(11n)).toEqual(false);
+    });
+
+    it("between predicate rejects NaN and mismatched types", () => {
+        const numBetween = createBetweenPredicate(1, 3);
+        expect(numBetween(2)).toEqual(true);
+        expect(numBetween("2")).toEqual(false);
+
+        const badBetween = createBetweenPredicate(1, "3");
+        expect(badBetween(2)).toEqual(false);
+
+        const nanBetween = createBetweenPredicate(Number.NaN, 2);
+        expect(nanBetween(1)).toEqual(false);
+
+        const dateBetween = createBetweenPredicate(
+            new Date("2024-01-01T00:00:00.000Z"),
+            new Date("2024-01-02T00:00:00.000Z")
+        );
+        expect(dateBetween(new Date("2024-01-01T12:00:00.000Z"))).toEqual(true);
+        expect(dateBetween("2024-01-01")).toEqual(false);
+    });
+});
+
+describe("Comparator + heap helpers", () => {
+    it("compareNullable handles nulls and direction", () => {
+        expect(compareNullable(null, null, 1, false)).toEqual(0);
+        expect(compareNullable(null, 1, 1, true)).toBeLessThan(0);
+        expect(compareNullable(null, 1, 1, false)).toBeGreaterThan(0);
+        expect(compareNullable(2, 1, 1, false)).toBeGreaterThan(0);
+        expect(compareNullable(2, 1, -1, false)).toBeLessThan(0);
+        expect(compareNullable(2n, 3n, 1, false)).toBeLessThan(0);
+    });
+
+    it("createComparator respects multiple keys and stability", () => {
+        const orders = [
+            { segments: ["score"], direction: 1 as const, nullsFirst: false, resolve: (v: unknown) => typeof v === "number" ? v : null },
+            { segments: ["name"], direction: 1 as const, nullsFirst: false, resolve: (v: unknown) => typeof v === "string" ? v : null },
+            { segments: ["label"], direction: -1 as const, nullsFirst: true, resolve: (v: unknown) => typeof v === "string" ? v : null },
+            { segments: ["id"], direction: 1 as const, nullsFirst: false, resolve: (v: unknown) => typeof v === "number" ? v : null },
+        ];
+        const compare = createComparator<{ id: number }>(orders);
+        const entries = [
+            { item: { id: 1 }, index: 0, keys: [2, "b", "z", 10] },
+            { item: { id: 2 }, index: 1, keys: [2, "a", "z", 9] },
+            { item: { id: 3 }, index: 2, keys: [2, "a", "a", 8] },
+            { item: { id: 4 }, index: 3, keys: [1, "c", "z", 7] },
+        ];
+        entries.sort(compare);
+        expect(entries.map(entry => entry.item.id)).toEqual([4, 2, 3, 1]);
+    });
+
+    it("heap helpers keep max-heap order", () => {
+        const compare = (a: number, b: number) => a - b;
+        const heap: number[] = [];
+        heapPush(heap, 3, compare);
+        heapPush(heap, 1, compare);
+        heapPush(heap, 5, compare);
+        expect(heap[0]).toEqual(5);
+        heapReplaceRoot(heap, 2, compare);
+        expect(heap[0]).toEqual(3);
+    });
+});
+
+describe("Cache + path helpers", () => {
+    it("segments cache evicts when maxPathCache exceeded", () => {
+        const cache = createCacheState({ maxDateCache: 2, maxPathCache: 2 });
+        getSegments(cache, "a.b");
+        getSegments(cache, "c.d");
+        getSegments(cache, "e.f");
+        expect(cache.pathSegmentsCache.size).toEqual(2);
+    });
+
+    it("toTimestamp parses Date/number/ISO and rejects invalid", () => {
+        const cache = createCacheState({ maxDateCache: 2, maxPathCache: 2 });
+        const dateTime = toTimestamp(new Date("2024-01-01T00:00:00.000Z"), cache.parseIsoDate);
+        expect(dateTime).not.toBeNull();
+        expect(toTimestamp(123, cache.parseIsoDate)).toEqual(123);
+        const isoTime = toTimestamp("2024-01-01T00:00:00.000Z", cache.parseIsoDate);
+        expect(isoTime).not.toBeNull();
+        expect(toTimestamp("not-a-date", cache.parseIsoDate)).toBeNull();
+        expect(toTimestamp(true, cache.parseIsoDate)).toBeNull();
+    });
+
+    it("path helpers resolve and iterate across deep arrays", () => {
+        const obj: ResolveObject = {
+            a: { b: [{ c: 1 }, { c: 2 }, { c: 3 }] },
+        };
+        const segments = ["a", "b", "c", "value"];
+        expect(pathExistsWithSegments(obj, ["a"])).toEqual(true);
+        expect(pathExistsWithSegments(obj, segments)).toEqual(false);
+
+        const flatSegments = ["a", "b", "c"];
+        const found = someResolvedWithSegments(obj, flatSegments, value => value === 2);
+        expect(found).toEqual(true);
+
+        const first = resolveFirstWithSegments(obj, flatSegments);
+        expect(first).toEqual(1);
+
+        const values: number[] = [];
+        forEachResolvedWithSegments(obj, flatSegments, value => {
+            if (typeof value === "number") values.push(value);
+        });
+        expect(values).toEqual([1, 2, 3]);
+
+        const every = everyResolvedWithSegments(obj, flatSegments, value => typeof value === "number");
+        expect(every).toEqual(true);
+
+        const deepObj: ResolveObject = {
+            a: { b: { c: [{ d: 1 }, { d: 2 }] } },
+        };
+        const deepSegments = ["a", "b", "c", "d"];
+        expect(someResolvedWithSegments(deepObj, deepSegments, value => value === 2)).toEqual(true);
+        expect(resolveFirstWithSegments(deepObj, deepSegments)).toEqual(1);
+        const deepValues: number[] = [];
+        forEachResolvedWithSegments(deepObj, deepSegments, value => {
+            if (typeof value === "number") deepValues.push(value);
+        });
+        expect(deepValues).toEqual([1, 2]);
+        expect(everyResolvedWithSegments(deepObj, deepSegments, value => typeof value === "number")).toEqual(true);
+    });
+
+    it("resolveOrderValueWithSegments returns null for unsupported types", () => {
+        const cache = createCacheState({ maxDateCache: 4, maxPathCache: 4 });
+        const orderValue = resolveOrderValueWithSegments(
+            { val: { nested: { obj: { x: 1 } } } } as ResolveObject,
+            ["val", "nested", "obj"],
+            cache.orderResolver
+        );
+        expect(orderValue).toBeNull();
+    });
+});
+
+describe("Ingress + schema helpers", () => {
+    it("supports schema.inline and schema.infer", () => {
+        const inline = Schema.inline<SampleItem>();
+        const inferred = Schema.infer({ id: 1, name: "x" });
+        expect(inline.source).toEqual("inline");
+        expect(inferred.source).toEqual("inferred");
+        expect(inferred.sample).toEqual({ id: 1, name: "x" });
+    });
+
+    it("ingress load, loadFrom, clear, length, isEmpty", () => {
+        const ingress = IngressEngine.from(data);
+        expect(ingress.length).toEqual(4);
+        expect(ingress.isEmpty()).toEqual(false);
+
+        const cleared = ingress.clear();
+        expect(cleared.length).toEqual(0);
+        expect(cleared.isEmpty()).toEqual(true);
+
+        const reloaded = cleared.load(data);
+        expect(reloaded.length).toEqual(4);
+
+        const loadedFrom = ingress.loadFrom({ payload: data.slice(0, 2) }, (input) => input.payload);
+        expect(loadedFrom.length).toEqual(2);
+    });
+
+    it("ingress create respects shared cache usage", () => {
+        IngressEngine.configure({ sharedCache: true, maxDateCache: 2, maxPathCache: 2 });
+        const a = IngressEngine.create<SampleItem>();
+        const b = IngressEngine.create<SampleItem>();
+        expect(a.cache).toBe(b.cache);
+        IngressEngine.clearCaches();
+        IngressEngine.configure({ sharedCache: false, maxDateCache: 2048, maxPathCache: 2048 });
+    });
+});
+
+describe("Execution + egress edge cases", () => {
+    it("execution returns clone when no predicates", () => {
+        const ingress = IngressEngine.from(data);
+        const plan = Engine.from(ingress).compilePlan();
+        const executor = new ExecutionEngine<SampleItem>();
+        const result = executor.execute(ingress, plan);
+        expect(result).toEqual(data);
+        expect(result).not.toBe(data);
+    });
+
+    it("egress limit/offset/page sanitize invalid values", () => {
+        const offsetOnly = makeEngine()
+            .out()
+            .offset(-5)
+            .result()
+            .map(item => item.id);
+        expect(offsetOnly).toEqual([1, 2, 3, 4]);
+
+        const limited = makeEngine()
+            .out()
+            .limit(Number.NaN)
+            .result()
+            .map(item => item.id);
+        expect(limited).toEqual([]);
+
+        const paged = makeEngine().out().page(0, 0).result().map(item => item.id);
+        expect(paged).toEqual([1]);
+    });
+
+    it("egress paginate handles out-of-range pages", () => {
+        const cursor = makeEngine()
+            .out()
+            .paginate({ pageSize: 2, page: 10, total: "lazy" });
+        expect(cursor.data).toEqual([]);
+        expect(cursor.total).toEqual(4);
+        const prev = cursor.previous();
+        expect(prev.page).toEqual(9);
+    });
+
+    it("groupBy date option normalizes date values", () => {
+        const grouped = makeEngine()
+            .out()
+            .groupBy("created", { date: true });
+        const keys = Array.from(grouped.keys()).filter(key => typeof key === "number");
+        expect(keys.length).toBeGreaterThan(0);
     });
 });
