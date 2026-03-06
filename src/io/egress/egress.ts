@@ -20,6 +20,8 @@ import { resolveOrderValueWithSegments } from "@/core/shared/path";
 import { createComparator } from "@/core/engine/compare";
 import type { Orderable1, Orderable2, Orderable3, OrderableN, Orderable } from "@/core/engine/compare";
 import { logPlanner } from "@/core/engine/planner-logger";
+import type { TimingToken } from "@/core/engine/telemetry";
+import { emitMarker, emitMetrics, endTiming, startTiming } from "@/core/engine/telemetry";
 
 export type EgressMode = "sync" | "async";
 
@@ -176,6 +178,10 @@ export class EgressEngine<
                 ...this.state.plan,
                 searchFilters: [...this.state.plan.searchFilters, ...this.state.searchFilters],
             };
+        const runTiming = startTiming("egress", "run.execute", mergedPlan.id);
+        const timing = startTiming("egress", "egress.executeResult", mergedPlan.id, runTiming);
+        emitMarker("egress", "egress.execute.start", mergedPlan.id, timing);
+        emitMarker("egress", "egress.mergeFilters", mergedPlan.id, timing);
         logPlanner({
             source: "egress",
             type: "input",
@@ -188,10 +194,11 @@ export class EgressEngine<
             },
         });
         if (this.state.ingress instanceof Object && "mode" in this.state.ingress && this.state.ingress.mode === "async") {
-            return this.executeAsync(mergedPlan);
+            endTiming(timing, { skipData: true });
+            return this.executeAsync(mergedPlan, runTiming);
         }
         const executor = new ExecutionEngine<T>();
-        const filtered = executor.execute(this.state.ingress as IngressEngine<T>, mergedPlan);
+        const filtered = executor.execute(this.state.ingress as IngressEngine<T>, mergedPlan, { timingParent: timing });
         logPlanner({
             source: "egress",
             type: "final",
@@ -203,10 +210,32 @@ export class EgressEngine<
                 resultCount: filtered.length,
             },
         });
-        return finalizeOrderAndWindow(filtered, this.state.orders, this.state.limitCount, this.state.offsetCount);
+        emitMetrics({
+            source: "egress",
+            planId: mergedPlan.id,
+            metrics: {
+                extras: {
+                    mode: "sync",
+                    hasSearch: mergedPlan.searchFilters.length > 0,
+                    orders: this.state.orders.length,
+                    limit: this.state.limitCount,
+                    offset: this.state.offsetCount,
+                },
+            },
+        });
+        const finalizeTiming = startTiming("egress", "egress.finalizeOrder", mergedPlan.id, timing);
+        const finalized = finalizeOrderAndWindow(filtered, this.state.orders, this.state.limitCount, this.state.offsetCount);
+        endTiming(finalizeTiming, { skipData: true });
+        emitMarker("egress", "egress.result.final", mergedPlan.id, timing);
+        endTiming(timing, { skipData: true });
+        endTiming(runTiming, { skipData: true });
+        return finalized;
     }
 
-    private async executeAsync(plan: QueryPlan<T>): Promise<Array<T>> {
+    private async executeAsync(plan: QueryPlan<T>, runTiming?: TimingToken | null): Promise<Array<T>> {
+        const rootTiming = runTiming ?? startTiming("egress", "run.execute", plan.id);
+        const timing = startTiming("egress", "egress.executeAsync", plan.id, rootTiming);
+        emitMarker("egress", "egress.execute.start", plan.id, timing);
         const limit = this.state.limitCount;
         const offset = this.state.offsetCount;
         const hasOrders = this.state.orders.length > 0;
@@ -222,6 +251,7 @@ export class EgressEngine<
             && this.state.searchFilters.length === 0
             && !(offset > 0 && limit === null)
         ) {
+            const pushdownTiming = startTiming("egress", "egress.pushdownAttempt", plan.id, timing);
             const query: PushdownQuery = {
                 limit: limit === null ? undefined : limit,
                 offset: offset > 0 ? offset : undefined,
@@ -242,6 +272,7 @@ export class EgressEngine<
             if (pushed) {
                 const output: Array<T> = [];
                 for await (const item of pushed) {output.push(item);}
+                endTiming(pushdownTiming, { skipData: true });
                 logPlanner({
                     source: "egress",
                     type: "final",
@@ -252,8 +283,25 @@ export class EgressEngine<
                         resultCount: output.length,
                     },
                 });
+                emitMetrics({
+                    source: "egress",
+                    planId: plan.id,
+                    metrics: {
+                        extras: {
+                            path: "pushdown",
+                            hasOrders,
+                            hasSearch,
+                            limit,
+                            offset,
+                        },
+                    },
+                });
+                emitMarker("egress", "egress.result.final", plan.id, timing);
+                endTiming(timing, { skipData: true });
+                endTiming(rootTiming, { skipData: true });
                 return output;
             }
+            endTiming(pushdownTiming, { skipData: true });
         }
 
         if (
@@ -289,6 +337,7 @@ export class EgressEngine<
                 requiresGrouping: false,
                 requiresOrdering: hasOrders,
                 windowLimit,
+                timingParent: timing,
             }
         );
         logPlanner({
@@ -304,7 +353,27 @@ export class EgressEngine<
                 resultCount: filtered.length,
             },
         });
-        return finalizeOrderAndWindow(filtered, this.state.orders, this.state.limitCount, this.state.offsetCount);
+        emitMetrics({
+            source: "egress",
+            planId: plan.id,
+            metrics: {
+                extras: {
+                    path: "local",
+                    hasOrders,
+                    hasSearch,
+                    limit,
+                    offset,
+                    windowLimit,
+                },
+            },
+        });
+        const finalizeTiming = startTiming("egress", "egress.finalizeOrder", plan.id, timing);
+        const finalized = finalizeOrderAndWindow(filtered, this.state.orders, this.state.limitCount, this.state.offsetCount);
+        endTiming(finalizeTiming, { skipData: true });
+        emitMarker("egress", "egress.result.final", plan.id, timing);
+        endTiming(timing, { skipData: true });
+        endTiming(rootTiming, { skipData: true });
+        return finalized;
     }
 
 
@@ -491,7 +560,8 @@ export class EgressEngine<
             mergedPlan.fuzzyConfig,
             mergedPlan.taggerConfig as CompiledTaggerConfig<T, AvailableTags<SearchCapabilityState>> | null,
             mergedPlan.searchFilters,
-            true
+            true,
+            mergedPlan.id
         );
         return mapSearchMetadata(result);
     }
@@ -512,7 +582,8 @@ export class EgressEngine<
             mergedPlan.fuzzyConfig,
             mergedPlan.taggerConfig as CompiledTaggerConfig<T, AvailableTags<SearchCapabilityState>> | null,
             mergedPlan.searchFilters,
-            true
+            true,
+            mergedPlan.id
         );
         return mapSearchMetadata(result);
     }

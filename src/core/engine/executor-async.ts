@@ -4,18 +4,28 @@ import { executeSearchPipeline, executeSearchPipelineAsync } from "@/core/search
 import type { SearchCapabilityState, AvailableTags } from "@/types/search";
 import type { CompiledTaggerConfig } from "@/core/search/runtime";
 import { planIngress } from "@/core/engine/ingress-plan";
+import { emitMarker, emitMetrics, endTiming, startTiming } from "@/core/engine/telemetry";
+import type { TimingToken } from "@/core/engine/telemetry";
+import { createPredicateExecutionMetrics, shouldCollectDeepMetrics } from "@/core/engine/metrics";
+import { nowMs } from "@/core/engine/telemetry-time";
 
 export class AsyncExecutionEngine<T extends Record<string, unknown>> {
     async execute(
         ingress: AsyncIngressEngine<T>,
         plan: QueryPlan<T>,
-        options?: { requiresGrouping?: boolean; requiresOrdering?: boolean; windowLimit?: number; }
+        options?: { requiresGrouping?: boolean; requiresOrdering?: boolean; windowLimit?: number; timingParent?: TimingToken | null; }
     ): Promise<Array<T>> {
         const hasSearch = plan.searchFilters.length > 0;
         const predicates = plan.predicates;
         const predicateFn = plan.predicateFn;
         const residualPredicateFn = plan.residualPredicateFn;
+        const execTiming = startTiming("execution", "execution.executeAsync", plan.id, options?.timingParent ?? null);
+        emitMarker("execution", "execution.execute.start", plan.id, execTiming);
+        const collectMetrics = shouldCollectDeepMetrics();
+        const predicateMetrics = collectMetrics ? createPredicateExecutionMetrics() : null;
         if (plan.alwaysFalse) {
+            emitMarker("execution", "execution.execute.end", plan.id, execTiming);
+            endTiming(execTiming, { skipData: true });
             return [];
         }
         const requiresGrouping = options?.requiresGrouping ?? false;
@@ -25,16 +35,24 @@ export class AsyncExecutionEngine<T extends Record<string, unknown>> {
             ingress.capabilities,
             requiresOrdering,
             requiresGrouping,
-            hasSearch
+            hasSearch,
+            execTiming
         );
         const shouldStream = ingressPlan.strategy === "stream";
 
         const windowLimit = options?.windowLimit;
 
         if (!shouldStream) {
+            const loadTiming = startTiming("execution", "execution.load.materialize", plan.id, execTiming);
             const data = await ingress.materialize();
-            if (predicates.length === 0 && !hasSearch) {return [...data];}
+            endTiming(loadTiming, { skipData: true });
+            if (predicates.length === 0 && !hasSearch) {
+                emitMarker("execution", "execution.execute.end", plan.id, execTiming);
+                endTiming(execTiming, { skipData: true });
+                return [...data];
+            }
             if (hasSearch) {
+                const searchTiming = startTiming("execution", "execution.searchPipeline", plan.id, execTiming);
                 const result = executeSearchPipeline<T, SearchCapabilityState>(
                     data,
                     predicates,
@@ -43,30 +61,91 @@ export class AsyncExecutionEngine<T extends Record<string, unknown>> {
                     plan.fuzzyConfig,
                     plan.taggerConfig as CompiledTaggerConfig<T, AvailableTags<SearchCapabilityState>> | null,
                     plan.searchFilters,
-                    false
+                    false,
+                    plan.id,
+                    execTiming
                 );
+                endTiming(searchTiming, { skipData: true });
+                emitMarker("execution", "execution.execute.end", plan.id, execTiming);
+                endTiming(execTiming, { skipData: true });
                 return result.items;
             }
             const output: Array<T> = [];
+            const useMetrics = predicateMetrics !== null && plan.predicateSpecs && plan.predicateSpecs.length > 0;
             if (residualPredicateFn && residualPredicateFn !== predicateFn) {
                 for (let i = 0; i < data.length; i++) {
                     const item = data[i]!;
-                    if (!predicateFn(item)) {continue;}
+                    let ok = true;
+                    if (useMetrics) {
+                        for (let p = 0; p < plan.predicateSpecs!.length; p++) {
+                            const spec = plan.predicateSpecs![p]!;
+                            const start = nowMs();
+                            const passed = spec.predicate(item);
+                            const elapsed = nowMs() - start;
+                            predicateMetrics!.counts[spec.op] = (predicateMetrics!.counts[spec.op] ?? 0) + 1;
+                            predicateMetrics!.durationsMs[spec.op] = (predicateMetrics!.durationsMs[spec.op] ?? 0) + elapsed;
+                            if (!passed) {ok = false; break;}
+                        }
+                        if (!ok) {continue;}
+                    } else if (!predicateFn(item)) {
+                        continue;
+                    }
                     if (!residualPredicateFn(item)) {continue;}
                     output.push(item);
                 }
+                if (useMetrics && predicateMetrics) {
+                    emitMetrics({
+                        source: "execution",
+                        planId: plan.id,
+                        metrics: {
+                            counts: predicateMetrics.counts,
+                            durationsMs: predicateMetrics.durationsMs,
+                            extras: { phase: "executeAsync" },
+                        },
+                    });
+                }
+                emitMarker("execution", "execution.execute.end", plan.id, execTiming);
+                endTiming(execTiming, { skipData: true });
                 return output;
             }
             for (let i = 0; i < data.length; i++) {
                 const item = data[i]!;
-                if (!predicateFn(item)) {continue;}
+                let ok = true;
+                if (useMetrics) {
+                    for (let p = 0; p < plan.predicateSpecs!.length; p++) {
+                        const spec = plan.predicateSpecs![p]!;
+                        const start = nowMs();
+                        const passed = spec.predicate(item);
+                        const elapsed = nowMs() - start;
+                        predicateMetrics!.counts[spec.op] = (predicateMetrics!.counts[spec.op] ?? 0) + 1;
+                        predicateMetrics!.durationsMs[spec.op] = (predicateMetrics!.durationsMs[spec.op] ?? 0) + elapsed;
+                        if (!passed) {ok = false; break;}
+                    }
+                    if (!ok) {continue;}
+                } else if (!predicateFn(item)) {
+                    continue;
+                }
                 output.push(item);
             }
+            if (useMetrics && predicateMetrics) {
+                emitMetrics({
+                    source: "execution",
+                    planId: plan.id,
+                    metrics: {
+                        counts: predicateMetrics.counts,
+                        durationsMs: predicateMetrics.durationsMs,
+                        extras: { phase: "executeAsync" },
+                    },
+                });
+            }
+            emitMarker("execution", "execution.execute.end", plan.id, execTiming);
+            endTiming(execTiming, { skipData: true });
             return output;
         }
 
         if (hasSearch) {
             if (shouldStream) {
+                const searchTiming = startTiming("execution", "execution.searchPipelineAsync", plan.id, execTiming);
                 const result = await executeSearchPipelineAsync<T, SearchCapabilityState>(
                     ingress.stream(),
                     predicates,
@@ -76,11 +155,17 @@ export class AsyncExecutionEngine<T extends Record<string, unknown>> {
                     plan.taggerConfig as CompiledTaggerConfig<T, AvailableTags<SearchCapabilityState>> | null,
                     plan.searchFilters,
                     false,
-                    windowLimit
+                    windowLimit,
+                    plan.id,
+                    execTiming
                 );
+                endTiming(searchTiming, { skipData: true });
+                emitMarker("execution", "execution.execute.end", plan.id, execTiming);
+                endTiming(execTiming, { skipData: true });
                 return result.items;
             }
             const data = await ingress.materialize();
+            const searchTiming = startTiming("execution", "execution.searchPipeline", plan.id, execTiming);
             const result = executeSearchPipeline<T, SearchCapabilityState>(
                 data,
                 predicates,
@@ -89,39 +174,132 @@ export class AsyncExecutionEngine<T extends Record<string, unknown>> {
                 plan.fuzzyConfig,
                 plan.taggerConfig as CompiledTaggerConfig<T, AvailableTags<SearchCapabilityState>> | null,
                 plan.searchFilters,
-                false
+                false,
+                plan.id,
+                execTiming
             );
+            endTiming(searchTiming, { skipData: true });
+            emitMarker("execution", "execution.execute.end", plan.id, execTiming);
+            endTiming(execTiming, { skipData: true });
             return result.items;
         }
 
         const output: Array<T> = [];
         if (shouldStream) {
+            const streamTiming = startTiming("execution", "execution.executeAsync.stream", plan.id, execTiming);
+            emitMarker("execution", "execution.load.stream", plan.id, execTiming);
             const limit = windowLimit ?? 0;
+            const useMetrics = predicateMetrics !== null && plan.predicateSpecs && plan.predicateSpecs.length > 0;
             for await (const item of ingress.stream()) {
-                if (!predicateFn(item)) {continue;}
+                let ok = true;
+                if (useMetrics) {
+                    for (let p = 0; p < plan.predicateSpecs!.length; p++) {
+                        const spec = plan.predicateSpecs![p]!;
+                        const start = nowMs();
+                        const passed = spec.predicate(item);
+                        const elapsed = nowMs() - start;
+                        predicateMetrics!.counts[spec.op] = (predicateMetrics!.counts[spec.op] ?? 0) + 1;
+                        predicateMetrics!.durationsMs[spec.op] = (predicateMetrics!.durationsMs[spec.op] ?? 0) + elapsed;
+                        if (!passed) {ok = false; break;}
+                    }
+                    if (!ok) {continue;}
+                } else if (!predicateFn(item)) {
+                    continue;
+                }
                 if (residualPredicateFn && residualPredicateFn !== predicateFn && !residualPredicateFn(item)) {
                     continue;
                 }
                 output.push(item);
                 if (limit > 0 && output.length >= limit) {break;}
             }
+            endTiming(streamTiming, { skipData: true });
+            if (useMetrics && predicateMetrics) {
+                emitMetrics({
+                    source: "execution",
+                    planId: plan.id,
+                    metrics: {
+                        counts: predicateMetrics.counts,
+                        durationsMs: predicateMetrics.durationsMs,
+                        extras: { phase: "executeAsync.stream" },
+                    },
+                });
+            }
+            emitMarker("execution", "execution.execute.end", plan.id, execTiming);
+            endTiming(execTiming, { skipData: true });
             return output;
         }
+        const loadTiming = startTiming("execution", "execution.load.materialize", plan.id, execTiming);
         const data = await ingress.materialize();
+        endTiming(loadTiming, { skipData: true });
+        const useMetrics = predicateMetrics !== null && plan.predicateSpecs && plan.predicateSpecs.length > 0;
         if (residualPredicateFn && residualPredicateFn !== predicateFn) {
             for (let i = 0; i < data.length; i++) {
                 const item = data[i]!;
-                if (!predicateFn(item)) {continue;}
+                let ok = true;
+                if (useMetrics) {
+                    for (let p = 0; p < plan.predicateSpecs!.length; p++) {
+                        const spec = plan.predicateSpecs![p]!;
+                        const start = nowMs();
+                        const passed = spec.predicate(item);
+                        const elapsed = nowMs() - start;
+                        predicateMetrics!.counts[spec.op] = (predicateMetrics!.counts[spec.op] ?? 0) + 1;
+                        predicateMetrics!.durationsMs[spec.op] = (predicateMetrics!.durationsMs[spec.op] ?? 0) + elapsed;
+                        if (!passed) {ok = false; break;}
+                    }
+                    if (!ok) {continue;}
+                } else if (!predicateFn(item)) {
+                    continue;
+                }
                 if (!residualPredicateFn(item)) {continue;}
                 output.push(item);
             }
+            if (useMetrics && predicateMetrics) {
+                emitMetrics({
+                    source: "execution",
+                    planId: plan.id,
+                    metrics: {
+                        counts: predicateMetrics.counts,
+                        durationsMs: predicateMetrics.durationsMs,
+                        extras: { phase: "executeAsync.materialize" },
+                    },
+                });
+            }
+            emitMarker("execution", "execution.execute.end", plan.id, execTiming);
+            endTiming(execTiming, { skipData: true });
             return output;
         }
         for (let i = 0; i < data.length; i++) {
             const item = data[i]!;
-            if (!predicateFn(item)) {continue;}
+            let ok = true;
+            if (useMetrics) {
+                for (let p = 0; p < plan.predicateSpecs!.length; p++) {
+                    const spec = plan.predicateSpecs![p]!;
+                    const start = nowMs();
+                    const passed = spec.predicate(item);
+                    const elapsed = nowMs() - start;
+                    predicateMetrics!.counts[spec.op] = (predicateMetrics!.counts[spec.op] ?? 0) + 1;
+                    predicateMetrics!.durationsMs[spec.op] = (predicateMetrics!.durationsMs[spec.op] ?? 0) + elapsed;
+                    if (!passed) {ok = false; break;}
+                }
+                if (!ok) {continue;}
+            } else if (!predicateFn(item)) {
+                continue;
+            }
             output.push(item);
         }
+        if (useMetrics && predicateMetrics) {
+            emitMetrics({
+                source: "execution",
+                planId: plan.id,
+                metrics: {
+                    counts: predicateMetrics.counts,
+                    durationsMs: predicateMetrics.durationsMs,
+                    extras: { phase: "executeAsync.materialize" },
+                },
+            });
+        }
+        emitMarker("execution", "execution.execute.end", plan.id, execTiming);
+        endTiming(execTiming, { skipData: true });
         return output;
     }
 }

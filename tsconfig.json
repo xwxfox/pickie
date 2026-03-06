@@ -30,5 +30,5 @@
     "noImplicitAny": true,
     "noPropertyAccessFromIndexSignature": false
   },
-  "exclude": ["random_testing/**.ts"]
+  "exclude": ["random_testing/schema/*.ts"]
 }

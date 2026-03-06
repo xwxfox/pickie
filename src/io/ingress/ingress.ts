@@ -1,10 +1,10 @@
 import type { CacheOptions } from "@/types";
+import { emitMarker } from "@/core/engine/telemetry";
 import type { Schema } from "@/io/schema";
 import type {
     AsyncIngressSource,
     IngressCapabilities,
     IngressHints,
-    IngressMode,
     IngressSource,
     SyncIngressSource,
 } from "@/io/ingress/types";
@@ -49,7 +49,7 @@ function mergeHints<T extends Record<string, unknown>>(
 }
 
 export class IngressEngine<T extends Record<string, unknown>> {
-    public readonly mode: IngressMode = "sync";
+    public readonly mode = "sync" as const;
     public constructor(
         public readonly data: ReadonlyArray<T>,
         public readonly cache: CacheState,
@@ -63,6 +63,7 @@ export class IngressEngine<T extends Record<string, unknown>> {
         schema?: Schema<T>,
         config?: IngressConfig<T>
     ): IngressEngine<T> {
+        emitMarker("misc", "source.create", "ingress");
         const cache = resolveCacheState(config);
         const capabilities = normalizeIngressCapabilities(config?.capabilities);
         const hints = mergeHints(config?.hints, undefined);
@@ -73,6 +74,7 @@ export class IngressEngine<T extends Record<string, unknown>> {
         config?: IngressConfig<T>,
         schema?: Schema<T>
     ): IngressEngine<T> {
+        emitMarker("misc", "source.create", "ingress");
         const cache = resolveCacheState(config);
         const capabilities = normalizeIngressCapabilities(config?.capabilities);
         const empty: Array<T> = [];
@@ -98,6 +100,7 @@ export class IngressEngine<T extends Record<string, unknown>> {
         source: IngressSource<T>,
         config?: IngressConfig<T>
     ): IngressEngine<T> | AsyncIngressEngine<T> {
+        emitMarker("misc", "source.create", "ingress");
         const cache = resolveCacheState(config);
         const capabilities = normalizeIngressCapabilities({
             ...source.capabilities,
@@ -157,7 +160,7 @@ export class IngressEngine<T extends Record<string, unknown>> {
 }
 
 export class AsyncIngressEngine<T extends Record<string, unknown>> {
-    public readonly mode: IngressMode = "async";
+    public readonly mode = "async" as const;
     public constructor(
         public readonly source: AsyncIngressSource<T>,
         public readonly cache: CacheState,

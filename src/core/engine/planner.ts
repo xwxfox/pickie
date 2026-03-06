@@ -7,7 +7,10 @@ import type { CompiledFuzzyConfig, CompiledTaggerConfig } from "@/core/search/ru
 import type { IngressHints } from "@/io/ingress/types";
 import { createComparePredicate } from "@/core/engine/predicates/compare";
 import { createBetweenPredicate } from "@/core/engine/predicates/range";
-import { getPlannerDiagnosticsEnabled, logPlanner } from "./planner-logger";
+import { getPlannerDiagnosticsEnabled, getPlannerDeepMetricsEnabled, logPlanner } from "./planner-logger";
+import { emitMarker, emitMetrics, endTiming, startTiming } from "./telemetry";
+import type { TimingToken } from "./telemetry";
+import { aggregatePredicateSpecs } from "./metrics";
 
 type PlanInput<T extends Record<string, unknown>> = {
     cache: CacheState;
@@ -22,6 +25,7 @@ type PlanInput<T extends Record<string, unknown>> = {
     searchFilters: Array<SearchFilterState>;
     strictSearch: boolean;
     taggerConfig: CompiledTaggerConfig<T, string> | null;
+    timingParent?: TimingToken | null;
 };
 
 type AnalyzedPredicate<T> = PredicateSpec<T> & { cost: number; selectivity: number };
@@ -58,8 +62,10 @@ export function optimizePlan<T extends Record<string, unknown>>(
     input: PlanInput<T>
 ): QueryPlan<T> {
     const specs = input.predicateSpecs ?? [];
+    const planTiming = startTiming("execution", "execution.optimizePlan", input.id, input.timingParent ?? null);
     if (specs.length === 0) {
         const predicateFn = compilePredicateFn(input.predicates);
+        endTiming(planTiming, { skipData: true });
         return {
             cache: input.cache,
             fuzzyConfig: input.fuzzyConfig,
@@ -110,12 +116,15 @@ export function optimizePlan<T extends Record<string, unknown>>(
     let segment: Array<AnalyzedPredicate<T>> = [];
     const flushSegment = () => {
         if (segment.length === 0) {return;}
+        const mergeTiming = startTiming("execution", "execution.mergePass", input.id, planTiming);
         const merged = mergeSegment(segment, merges);
+        endTiming(mergeTiming);
         if (merged.alwaysFalse) {
             alwaysFalse = true;
             segment = [];
             return;
         }
+        const orderTiming = startTiming("execution", "execution.orderPass", input.id, planTiming);
         const mergedAnalyzed = merged.specs.map((spec) => {
             const estimate = estimatePredicate(spec, input.hints);
             return { ...spec, cost: estimate.cost, selectivity: estimate.selectivity } as AnalyzedPredicate<T>;
@@ -132,6 +141,7 @@ export function optimizePlan<T extends Record<string, unknown>>(
             orderChanges.push({ before, after, reason: "cost/selectivity" });
         }
         optimized.push(...ordered);
+        endTiming(orderTiming);
         segment = [];
     };
 
@@ -192,6 +202,16 @@ export function optimizePlan<T extends Record<string, unknown>>(
             logPlanner({ source: "execution", type: "pushdown", planId: input.id, data: plan.diagnostics?.pushdown });
             logPlanner({ source: "execution", type: "final", planId: input.id, data: plan.diagnostics?.final });
         }
+    if (getPlannerDeepMetricsEnabled()) {
+        const aggregated = aggregatePredicateSpecs(optimized.map(stripAnalysis));
+        emitMetrics({
+            source: "execution",
+            planId: input.id,
+            metrics: buildExecutionMetrics(analyzed, merges, 0, 0, aggregated),
+        });
+    }
+        emitMarker("execution", "plan.optimize.end", input.id, planTiming);
+        endTiming(planTiming, { skipData: true });
         return plan;
     }
 
@@ -206,6 +226,8 @@ export function optimizePlan<T extends Record<string, unknown>>(
     const predicates = predicateSpecs.map((spec) => spec.predicate);
     const predicateFn = compilePredicateFn(predicates);
 
+    const pushdownSplitTiming = startTiming("execution", "execution.pushdownSplit", input.id, planTiming);
+
     const pushdownSpecs = predicateSpecs.filter((spec) => !!spec.pushdown && spec.kind === "builtin");
     const residualSpecs = predicateSpecs.filter((spec) => !spec.pushdown || spec.kind !== "builtin");
     const pushdownPredicates = pushdownSpecs.map((spec) => spec.pushdown!) as Array<PushdownPredicate>;
@@ -213,6 +235,7 @@ export function optimizePlan<T extends Record<string, unknown>>(
     const residualPredicateFn = compilePredicateFn(residualPredicates);
     const pushdownSafe = residualPredicates.length === 0;
     const finalPushdownPredicates = skipPushdown || !shouldAllowPushdown ? [] : pushdownPredicates;
+    endTiming(pushdownSplitTiming, { skipData: true });
 
     const planning = summarizePlanning(
         predicateSpecs,
@@ -236,6 +259,16 @@ export function optimizePlan<T extends Record<string, unknown>>(
         logPlanner({ source: "execution", type: "pushdown", planId: input.id, data: diagnostics.pushdown });
         logPlanner({ source: "execution", type: "final", planId: input.id, data: diagnostics.final });
     }
+    if (getPlannerDeepMetricsEnabled()) {
+        const aggregated = aggregatePredicateSpecs(predicateSpecs);
+        emitMetrics({
+            source: "execution",
+            planId: input.id,
+            metrics: buildExecutionMetrics(analyzed, merges, pushdownSpecs.length, residualSpecs.length, aggregated),
+        });
+    }
+
+    endTiming(planTiming, { skipData: true });
 
     return {
         cache: input.cache,
@@ -254,6 +287,30 @@ export function optimizePlan<T extends Record<string, unknown>>(
         searchFilters: input.searchFilters,
         strictSearch: input.strictSearch,
         taggerConfig: input.taggerConfig,
+    };
+}
+
+function buildExecutionMetrics<T>(
+    analyzed: Array<AnalyzedPredicate<T>>,
+    merges: Array<{ reason: string; removed: Array<string>; result: Array<string> }>,
+    pushdownCount: number,
+    residualCount: number,
+    aggregated: { countsByOp: Record<string, number>; countsByKind: Record<string, number> }
+): { counts?: Record<string, number>; durationsMs?: Record<string, number>; extras?: Record<string, unknown> } {
+    const costByOp: Record<string, number> = {};
+    for (let i = 0; i < analyzed.length; i++) {
+        const spec = analyzed[i]!;
+        costByOp[spec.op] = (costByOp[spec.op] ?? 0) + (spec.cost ?? 0);
+    }
+    return {
+        counts: aggregated.countsByOp,
+        extras: {
+            costByOp,
+            mergeCount: merges.length,
+            predicateCountsByKind: aggregated.countsByKind,
+            pushdownCount,
+            residualCount,
+        },
     };
 }
 

@@ -2,6 +2,8 @@ import type { CacheState } from "@/core/shared/cache";
 import { getPathAccessors } from "@/core/shared/cache";
 import type { PathAccessors } from "@/core/shared/path";
 import type { ResolveObject, ResolveValue, Predicate } from "@/types";
+import { emitMetrics, endTiming, startTiming } from "@/core/engine/telemetry";
+import type { TimingToken } from "@/core/engine/telemetry";
 import type {
     AvailableTags,
     FuzzyConfig,
@@ -372,8 +374,12 @@ export function executeSearchPipeline<T, C extends SearchCapabilityState>(
     fuzzyConfig: CompiledFuzzyConfig<T> | null,
     taggerConfig: CompiledTaggerConfig<T, AvailableTags<C>> | null,
     filters: ReadonlyArray<SearchFilterState>,
-    includeMetadata: boolean
+    includeMetadata: boolean,
+    planId?: string,
+    timingParent?: TimingToken | null
 ): SearchResult<T> {
+    const id = planId ?? "search";
+    const timing = startTiming("execution", "execution.searchPipeline", id, timingParent ?? null);
     const query: SearchQuery<string> = {};
     for (let i = 0; i < filters.length; i++) {
         const filter = filters[i]!;
@@ -452,14 +458,28 @@ export function executeSearchPipeline<T, C extends SearchCapabilityState>(
                 orderedMasks.push(tagMasks[idx]!);
             }
         }
-        return includeMetadata
+        const result = includeMetadata
             ? { items: orderedItems, scores: orderedScores, tagMasks: orderedMasks }
             : { items: orderedItems };
+        endTiming(timing, { skipData: true });
+        emitMetrics({
+            source: "execution",
+            planId: id,
+            metrics: { extras: { results: result.items.length, hasScoreOrder } },
+        });
+        return result;
     }
 
-    return includeMetadata
+    const result = includeMetadata
         ? { items: results, scores, tagMasks }
         : { items: results };
+    endTiming(timing, { skipData: true });
+    emitMetrics({
+        source: "execution",
+        planId: id,
+        metrics: { extras: { results: result.items.length, hasScoreOrder } },
+    });
+    return result;
 }
 
 export async function executeSearchPipelineAsync<T, C extends SearchCapabilityState>(
@@ -471,8 +491,12 @@ export async function executeSearchPipelineAsync<T, C extends SearchCapabilitySt
     taggerConfig: CompiledTaggerConfig<T, AvailableTags<C>> | null,
     filters: ReadonlyArray<SearchFilterState>,
     includeMetadata: boolean,
-    windowLimit?: number
+    windowLimit?: number,
+    planId?: string,
+    timingParent?: TimingToken | null
 ): Promise<SearchResult<T>> {
+    const id = planId ?? "search";
+    const timing = startTiming("execution", "execution.searchPipelineAsync", id, timingParent ?? null);
     const query: SearchQuery<string> = {};
     for (let i = 0; i < filters.length; i++) {
         const filter = filters[i]!;
@@ -562,9 +586,16 @@ export async function executeSearchPipelineAsync<T, C extends SearchCapabilitySt
                     orderedMasks.push(tagMasks[idx]!);
                 }
             }
-            return includeMetadata
+            const result = includeMetadata
                 ? { items: orderedItems, scores: orderedScores, tagMasks: orderedMasks }
                 : { items: orderedItems };
+            endTiming(timing, { skipData: true });
+            emitMetrics({
+                source: "execution",
+                planId: id,
+                metrics: { extras: { results: result.items.length, hasScoreOrder, topN: limit } },
+            });
+            return result;
         }
 
         heap.sort((a, b) => {
@@ -580,9 +611,16 @@ export async function executeSearchPipelineAsync<T, C extends SearchCapabilitySt
             }
         }
 
-        return includeMetadata
+        const result = includeMetadata
             ? { items: results, scores, tagMasks }
             : { items: results };
+        endTiming(timing, { skipData: true });
+        emitMetrics({
+            source: "execution",
+            planId: id,
+            metrics: { extras: { results: result.items.length, hasScoreOrder, topN: limit } },
+        });
+        return result;
     }
 
     let index = 0;
@@ -621,9 +659,16 @@ export async function executeSearchPipelineAsync<T, C extends SearchCapabilitySt
         if (windowLimit && windowLimit > 0 && results.length >= windowLimit) {break;}
     }
 
-    return includeMetadata
+    const result = includeMetadata
         ? { items: results, scores, tagMasks }
         : { items: results };
+    endTiming(timing, { skipData: true });
+    emitMetrics({
+        source: "execution",
+        planId: id,
+        metrics: { extras: { results: result.items.length, hasScoreOrder, topN: windowLimit } },
+    });
+    return result;
 }
 
 function insertTopN<T>(

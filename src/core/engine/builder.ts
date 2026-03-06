@@ -22,6 +22,7 @@ import { createDateEqualsPredicate, createDateComparePredicate, createDateBetwee
 import type { CacheState } from "@/core/shared/cache";
 import type { QueryPlan, PredicateSpec } from "./plan";
 import { optimizePlan } from "./planner";
+import { emitMarker, endTiming, startTiming } from "./telemetry";
 import { EgressEngine } from "@/io/egress";
 import { IngressEngine, AsyncIngressEngine } from "@/io/ingress";
 import { Schema } from "@/io/schema";
@@ -170,7 +171,8 @@ export class QueryBuilder<
     compilePlan(): QueryPlan<T> {
         const searchKey = `${this.state.fuzzyConfig ? "f" : "_"}${this.state.taggerConfig ? "t" : "_"}${this.state.searchFilters.length}`;
         const id = hashPlanId(this.state.predicates, searchKey);
-        return optimizePlan({
+        const timing = startTiming("execution", "execution.compilePlan", id);
+        const plan = optimizePlan({
             cache: this.state.cache,
             fuzzyConfig: this.state.fuzzyConfig,
             hints: this.ingress.hints,
@@ -183,10 +185,14 @@ export class QueryBuilder<
             searchFilters: this.state.searchFilters,
             strictSearch: this.state.strictSearch,
             taggerConfig: this.state.taggerConfig,
+            timingParent: timing,
         });
+        endTiming(timing, { skipData: true });
+        return plan;
     }
 
     out(): EgressEngine<T, C, M> {
+        emitMarker("egress", "egress.start", "egress");
         const plan = this.compilePlan();
         const ingress = this.ingress;
         if (ingress instanceof Object && "mode" in ingress && ingress.mode === "async") {

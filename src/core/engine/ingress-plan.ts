@@ -1,5 +1,7 @@
 import type { IngressCapabilities, IngressHints } from "@/io/ingress/types";
-import { logPlanner } from "./planner-logger";
+import { getPlannerDeepMetricsEnabled, logPlanner } from "./planner-logger";
+import { emitMarker, emitMetrics, endTiming, startTiming } from "./telemetry";
+import type { TimingToken } from "./telemetry";
 
 export type IngressStrategy = "eager" | "stream";
 
@@ -15,9 +17,12 @@ export function planIngress<T extends Record<string, unknown>>(
     capabilities: IngressCapabilities,
     requiresOrdering: boolean,
     requiresGrouping: boolean,
-    requiresSearch: boolean
+    requiresSearch: boolean,
+    timingParent?: TimingToken | null
 ): IngressPlan {
     const planId = "ingress";
+    const timing = startTiming("ingress", "ingress.planIngress", planId, timingParent ?? null);
+    emitMarker("ingress", "ingress.plan.start", planId, timingParent ?? null);
     logPlanner({
         source: "ingress",
         type: "input",
@@ -39,6 +44,19 @@ export function planIngress<T extends Record<string, unknown>>(
             planId,
             data: { plan, reason: "preferStreaming" },
         });
+        endTiming(timing, { skipData: true });
+        if (getPlannerDeepMetricsEnabled()) {
+            emitMetrics({
+                source: "ingress",
+                planId,
+                metrics: {
+                    extras: {
+                        reason: "preferStreaming",
+                        strategy: plan.strategy,
+                    },
+                },
+            });
+        }
         return plan;
     }
 
@@ -56,6 +74,20 @@ export function planIngress<T extends Record<string, unknown>>(
                 supported: { group: capabilities.group, order: capabilities.order },
             },
         });
+        endTiming(timing, { skipData: true });
+        if (getPlannerDeepMetricsEnabled()) {
+            emitMetrics({
+                source: "ingress",
+                planId,
+                metrics: {
+                    extras: {
+                        reason: "ordering/grouping",
+                        strategy: plan.strategy,
+                        supported: { group: capabilities.group, order: capabilities.order },
+                    },
+                },
+            });
+        }
         return plan;
     }
 
@@ -67,6 +99,16 @@ export function planIngress<T extends Record<string, unknown>>(
             planId,
             data: { plan, reason: "search" },
         });
+        endTiming(timing, { skipData: true });
+        if (getPlannerDeepMetricsEnabled()) {
+            emitMetrics({
+                source: "ingress",
+                planId,
+                metrics: {
+                    extras: { reason: "search", strategy: plan.strategy },
+                },
+            });
+        }
         return plan;
     }
 
@@ -87,6 +129,16 @@ export function planIngress<T extends Record<string, unknown>>(
                 eagerThreshold,
             },
         });
+        endTiming(timing, { skipData: true });
+        if (getPlannerDeepMetricsEnabled()) {
+            emitMetrics({
+                source: "ingress",
+                planId,
+                metrics: {
+                    extras: { reason: "estimatedCount", strategy: plan.strategy, estimatedCount, eagerThreshold },
+                },
+            });
+        }
         return plan;
     }
     if (estimatedCount && avgRowBytes > 0) {
@@ -106,6 +158,23 @@ export function planIngress<T extends Record<string, unknown>>(
                     reason: "memoryEstimate",
                 },
             });
+            endTiming(timing, { skipData: true });
+            if (getPlannerDeepMetricsEnabled()) {
+                emitMetrics({
+                    source: "ingress",
+                    planId,
+                    metrics: {
+                        extras: {
+                            reason: "memoryEstimate",
+                            strategy: plan.strategy,
+                            avgRowBytes,
+                            estimatedCount,
+                            estimateBytes,
+                            maxMemoryBytes,
+                        },
+                    },
+                });
+            }
             return plan;
         }
     }
@@ -123,5 +192,22 @@ export function planIngress<T extends Record<string, unknown>>(
             reason: "default",
         },
     });
+    endTiming(timing, { skipData: true });
+    if (getPlannerDeepMetricsEnabled()) {
+        emitMetrics({
+            source: "ingress",
+            planId,
+            metrics: {
+                extras: {
+                    reason: "default",
+                    strategy: plan.strategy,
+                    avgRowBytes,
+                    estimatedCount,
+                    eagerThreshold,
+                    maxMemoryBytes,
+                },
+            },
+        });
+    }
     return plan;
 }
