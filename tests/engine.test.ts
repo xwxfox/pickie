@@ -199,6 +199,39 @@ describe("Engine - core basics", () => {
     });
 });
 
+describe("Engine - first helpers", () => {
+    it("returns first match and respects offset", () => {
+        const first = makeEngine().equals("active", true).out().first();
+        expect(first?.id).toEqual(1);
+
+        const second = makeEngine().equals("active", true).out().offset(1).first();
+        expect(second?.id).toEqual(3);
+    });
+
+    it("returns undefined when limit is zero", () => {
+        const result = makeEngine().equals("active", true).out().limit(0).first();
+        expect(result).toBeUndefined();
+    });
+
+    it("keeps evaluating predicates before returning", () => {
+        const dupData = [
+            { active: false, id: 1, name: "a" },
+            { active: true, id: 1, name: "b" },
+            { active: true, id: 2, name: "c" },
+        ];
+        const result = Engine.from(IngressEngine.from(dupData))
+            .equals("id", 1)
+            .equals("active", true)
+            .out()
+            .first();
+        expect(result?.name).toEqual("b");
+    });
+
+    it("firstOrThrow throws when missing", () => {
+        expect(() => makeEngine().equals("id", 999).out().firstOrThrow()).toThrow();
+    });
+});
+
 describe("Engine - logical grouping", () => {
     it("and groups predicates", () => {
         const result = makeEngine()

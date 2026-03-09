@@ -14,7 +14,7 @@ import type { CompiledTaggerConfig } from "@/core/search/runtime";
 import type { GroupKeyValue } from "@/types/core";
 import { ExecutionEngine } from "@/core/engine/executor";
 import { AsyncExecutionEngine } from "@/core/engine/executor-async";
-import { executeSearchPipeline } from "@/core/search/runtime";
+import { executeSearchPipeline, executeSearchPipelineAsync } from "@/core/search/runtime";
 import { getPathAccessors } from "@/core/shared/cache";
 import { resolveOrderValueWithSegments } from "@/core/shared/path";
 import { createComparator } from "@/core/engine/compare";
@@ -171,6 +171,22 @@ export class EgressEngine<
         return this.executeResult() as M extends "async" ? Promise<Array<T>> : Array<T>;
     }
 
+    first(): M extends "async" ? Promise<T | undefined> : T | undefined {
+        return this.executeFirst() as M extends "async" ? Promise<T | undefined> : T | undefined;
+    }
+
+    firstOrThrow(): M extends "async" ? Promise<T> : T {
+        const result = this.first();
+        if (result instanceof Promise) {
+            return result.then((item) => {
+                if (item === undefined) {throw new Error("firstOrThrow() found no matching items.");}
+                return item;
+            }) as M extends "async" ? Promise<T> : T;
+        }
+        if (result === undefined) {throw new Error("firstOrThrow() found no matching items.");}
+        return result as M extends "async" ? Promise<T> : T;
+    }
+
     private executeResult(): Array<T> | Promise<Array<T>> {
         const mergedPlan = this.state.searchFilters.length === 0
             ? this.state.plan
@@ -230,6 +246,145 @@ export class EgressEngine<
         endTiming(timing, { skipData: true });
         endTiming(runTiming, { skipData: true });
         return finalized;
+    }
+
+    private executeFirst(): T | undefined | Promise<T | undefined> {
+        const mergedPlan = this.state.searchFilters.length === 0
+            ? this.state.plan
+            : {
+                ...this.state.plan,
+                searchFilters: [...this.state.plan.searchFilters, ...this.state.searchFilters],
+            };
+        if (this.state.ingress instanceof Object && "mode" in this.state.ingress && this.state.ingress.mode === "async") {
+            return this.executeFirstAsync(mergedPlan);
+        }
+        return this.executeFirstSync(mergedPlan);
+    }
+
+    private executeFirstSync(plan: QueryPlan<T>): T | undefined {
+        if (plan.alwaysFalse) {return undefined;}
+        if (this.state.limitCount === 0) {return undefined;}
+        const offset = this.state.offsetCount;
+        const hasOrders = this.state.orders.length > 0;
+        const hasSearch = plan.searchFilters.length > 0;
+
+        if (hasOrders) {
+            const items = this.result() as Array<T>;
+            return items[0];
+        }
+
+        const data = (this.state.ingress as IngressEngine<T>).data;
+
+        if (hasSearch) {
+            const windowLimit = offset + 1;
+            const result = executeSearchPipeline<T, SearchCapabilityState>(
+                data,
+                plan.predicates,
+                plan.predicateFn,
+                plan.cache,
+                plan.fuzzyConfig,
+                plan.taggerConfig as CompiledTaggerConfig<T, AvailableTags<SearchCapabilityState>> | null,
+                plan.searchFilters,
+                false,
+                plan.id,
+                undefined,
+                windowLimit
+            );
+            return result.items[offset];
+        }
+
+        if (plan.predicates.length === 0) {
+            return offset < data.length ? data[offset] : undefined;
+        }
+
+        const predicateFn = plan.predicateFn;
+        const residualPredicateFn = plan.residualPredicateFn;
+        let seen = 0;
+
+        if (residualPredicateFn && residualPredicateFn !== predicateFn) {
+            for (let i = 0; i < data.length; i++) {
+                const item = data[i]!;
+                if (!predicateFn(item)) {continue;}
+                if (!residualPredicateFn(item)) {continue;}
+                if (seen++ < offset) {continue;}
+                return item;
+            }
+            return undefined;
+        }
+
+        for (let i = 0; i < data.length; i++) {
+            const item = data[i]!;
+            if (!predicateFn(item)) {continue;}
+            if (seen++ < offset) {continue;}
+            return item;
+        }
+        return undefined;
+    }
+
+    private async executeFirstAsync(plan: QueryPlan<T>): Promise<T | undefined> {
+        if (plan.alwaysFalse) {return undefined;}
+        if (this.state.limitCount === 0) {return undefined;}
+        const offset = this.state.offsetCount;
+        const hasOrders = this.state.orders.length > 0;
+        const hasSearch = plan.searchFilters.length > 0;
+        const ingress = this.state.ingress as AsyncIngressEngine<T>;
+        const hasResidual = !!(plan.residualPredicates && plan.residualPredicates.length > 0);
+
+        if (!hasSearch && ingress.source.pushdown && !hasResidual && this.state.searchFilters.length === 0) {
+            const query: PushdownQuery = {
+                limit: 1,
+                offset: offset > 0 ? offset : undefined,
+                orders: this.state.pushdownOrders.length > 0 ? this.state.pushdownOrders : undefined,
+                predicates: plan.pushdownPredicates.length > 0 ? plan.pushdownPredicates : undefined,
+            };
+            const pushed = ingress.source.pushdown(query);
+            if (pushed) {
+                for await (const item of pushed) {return item;}
+                return undefined;
+            }
+        }
+
+        if (hasOrders) {
+            const items = await (this.result() as Promise<Array<T>>);
+            return items[0];
+        }
+
+        if (hasSearch) {
+            const result = await executeSearchPipelineAsync<T, SearchCapabilityState>(
+                ingress.stream(),
+                plan.predicates,
+                plan.predicateFn,
+                plan.cache,
+                plan.fuzzyConfig,
+                plan.taggerConfig as CompiledTaggerConfig<T, AvailableTags<SearchCapabilityState>> | null,
+                plan.searchFilters,
+                false,
+                offset + 1,
+                plan.id
+            );
+            return result.items[offset];
+        }
+
+        const predicateFn = plan.predicateFn;
+        const residualPredicateFn = plan.residualPredicateFn;
+        let seen = 0;
+
+        if (residualPredicateFn && residualPredicateFn !== predicateFn) {
+            for await (const item of ingress.stream()) {
+                if (!predicateFn(item)) {continue;}
+                if (!residualPredicateFn(item)) {continue;}
+                if (seen++ < offset) {continue;}
+                return item;
+            }
+            return undefined;
+        }
+
+        for await (const item of ingress.stream()) {
+            if (!predicateFn(item)) {continue;}
+            if (seen++ < offset) {continue;}
+            return item;
+        }
+        return undefined;
     }
 
     private async executeAsync(plan: QueryPlan<T>, runTiming?: TimingToken | null): Promise<Array<T>> {

@@ -110,6 +110,26 @@ describe("AsyncExecutionEngine", () => {
         expect(stats.streamedItems).toEqual(2);
     });
 
+    it("first streams until match and respects offset", async () => {
+        const { ingress, stats } = makeAsyncIngress(baseItems, { hints: { preferStreaming: true } });
+        if (ingress.mode !== "async") { throw new Error("Expected async ingress."); }
+        const first = await Engine.from(ingress)
+            .greaterThan("score", 4)
+            .out()
+            .first();
+        expect(first?.id).toEqual(1);
+        expect(stats.materializeCalls).toEqual(0);
+        expect(stats.streamCalls).toEqual(1);
+        expect(stats.streamedItems).toEqual(1);
+
+        const offsetFirst = await Engine.from(ingress)
+            .greaterThan("score", 4)
+            .out()
+            .offset(1)
+            .first();
+        expect(offsetFirst?.id).toEqual(2);
+    });
+
     it("materializes when ordering is required but unsupported", async () => {
         const { ingress, stats } = makeAsyncIngress(baseItems, { hints: { estimatedCount: 2 } });
         if (ingress.mode !== "async") { throw new Error("Expected async ingress."); }

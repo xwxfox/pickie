@@ -376,7 +376,8 @@ export function executeSearchPipeline<T, C extends SearchCapabilityState>(
     filters: ReadonlyArray<SearchFilterState>,
     includeMetadata: boolean,
     planId?: string,
-    timingParent?: TimingToken | null
+    timingParent?: TimingToken | null,
+    windowLimit?: number
 ): SearchResult<T> {
     const id = planId ?? "search";
     const timing = startTiming("execution", "execution.searchPipeline", id, timingParent ?? null);
@@ -393,6 +394,8 @@ export function executeSearchPipeline<T, C extends SearchCapabilityState>(
     const fuzzyMask = fuzzyInput ? queryMask(fuzzyQuery) : 0;
     const fuzzyMinScore = fuzzyInput?.minScore ?? fuzzyConfig?.minScore ?? (fuzzyConfig?.requireAll ? 1 : 0);
     const hasScoreOrder = fuzzyInput && fuzzyConfig && (fuzzyConfig.order === "score" || fuzzyConfig.order === "scoreThenOrder");
+    const limit = windowLimit ?? 0;
+    const enforceWindow = limit > 0 && !hasScoreOrder;
 
     const tagMask = taggerConfig
         ? buildTagMask(taggerConfig.indexOfTag, query.tags)
@@ -436,6 +439,9 @@ export function executeSearchPipeline<T, C extends SearchCapabilityState>(
         }
         if (includeMetadata) {
             tagMasks.push(tagsMaskValue);
+        }
+        if (enforceWindow && results.length >= limit) {
+            break;
         }
     }
 
