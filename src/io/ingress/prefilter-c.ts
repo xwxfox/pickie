@@ -109,11 +109,47 @@ function buildFieldTree(plan: PrefilterPlan): FieldNode {
   return root;
 }
 
+function selectMemmemCandidate(plan: PrefilterPlan): { values: string[]; predicateIndex: number } | null {
+  let bestCandidate: { values: string[]; predicateIndex: number; count: number } | null = null;
+
+  for (let i = 0; i < plan.predicates.length; i++) {
+    const pred = plan.predicates[i]!;
+    // Only string eq/in predicates are useful for memmem pre-screening
+    if (pred.type !== "string") continue;
+
+    let values: string[];
+    if (pred.op === "eq") {
+      values = [String(pred.value ?? "")];
+    } else if (pred.op === "in") {
+      values = ((pred.value as ReadonlyArray<string> | undefined) ?? []).map(String);
+    } else {
+      // ne, notIn, gt, gte, lt, lte - skip
+      continue;
+    }
+
+    if (values.length === 0) continue;
+
+    // Pick the candidate with the fewest values (most selective)
+    if (!bestCandidate || values.length < bestCandidate.count) {
+      bestCandidate = { values, predicateIndex: i, count: values.length };
+    }
+  }
+
+  return bestCandidate ? { values: bestCandidate.values, predicateIndex: bestCandidate.predicateIndex } : null;
+}
+
 function buildPrefilterSource(plan: PrefilterPlan): string {
   const predicates = plan.predicates;
   const fieldTree = buildFieldTree(plan);
+  const numPredicates = predicates.length;
 
-  const predicateState = predicates.map((_pred, index) => `int p${index}_seen = 0; int p${index}_pass = 0;`).join("\n  ");
+  const predicateState = [
+    ...predicates.map((_pred, index) => `int p${index}_seen = 0; int p${index}_pass = 0;`),
+    `int seen_count = 0;`,
+    `int _nest_depth = 1;`,
+  ].join("\n  ");
+
+  // predicateEval for the _ex version: endptr is already set at eval label, so return 0 directly
   const predicateEval = predicates.map((pred, index) => {
     if (pred.op === "ne") {
       return `if (!p${index}_seen) { p${index}_pass = 1; } if (!p${index}_pass) { return 0; }`;
@@ -125,6 +161,35 @@ function buildPrefilterSource(plan: PrefilterPlan): string {
   }).join("\n  ");
 
   const rootMatching = renderNodeMatching(fieldTree, plan, 0);
+
+  // Optimization #3: memmem pre-screening for NDJSON
+  const memmemCandidate = selectMemmemCandidate(plan);
+  let memmemGuard = "";
+  if (memmemCandidate) {
+    const checks = memmemCandidate.values.map((value) => {
+      const bytes = encoder.encode(`"${value}"`);
+      const literal = bytesToCString(bytes);
+      const len = bytes.length;
+      return `if (memmem(line_start, line_len, "${literal}", ${len}) != NULL) { memmem_hit = 1; }`;
+    }).join("\n      ");
+    memmemGuard = `
+      int memmem_hit = 0;
+      ${checks}
+      if (!memmem_hit) {
+        result = 0;
+      } else {
+        result = prefilter_object(line_start, line_len);
+      }`;
+  }
+
+  // Optimization #2: early exit check after each key-value pair
+  const allSeenCheck = `
+    if (seen_count >= ${numPredicates}) {
+      const char* rest = skip_object_rest(p, end, 1);
+      if (!rest) { return -1; }
+      *endptr = rest;
+      goto eval;
+    }`;
 
   return String.raw`
 #include <stddef.h>
@@ -414,11 +479,39 @@ static int match_string(const char* input, size_t len, const char* target, size_
   return match;
 }
 
-// Per-object prefilter. Scans a single JSON object at [input, input+length).
+// Skip remaining content of nested objects, finding the closing '}'.
+// initial_depth is how many unclosed braces we're inside of.
+// Returns pointer just past the outermost closing '}', or NULL on error.
+static const char* skip_object_rest(const char* p, const char* end, int initial_depth) {
+  int depth = initial_depth;
+  bool in_string = false;
+  bool escape = false;
+  while (p < end) {
+    char c = *p;
+    if (in_string) {
+      if (escape) { escape = false; }
+      else if (c == '\\') { escape = true; }
+      else if (c == '"') { in_string = false; }
+      p++;
+      continue;
+    }
+    if (c == '"') { in_string = true; p++; continue; }
+    if (c == '{' || c == '[') { depth++; p++; continue; }
+    if (c == '}' || c == ']') {
+      depth--;
+      p++;
+      if (depth == 0) { return p; }
+      continue;
+    }
+    p++;
+  }
+  return NULL;
+}
+
+// Extended per-object prefilter. Scans a single JSON object at [p, end).
+// On success (return 0 or 1), sets *endptr to position just past the closing '}'.
 // Returns 1 = match, 0 = fail, -1 = unknown (parse required).
-static int prefilter_object(const char* input, size_t length) {
-  const char* p = input;
-  const char* end = input + length;
+static int prefilter_object_ex(const char* p, const char* end, const char** endptr) {
   p = skip_ws(p, end);
   if (p >= end || *p != '{') { return -1; }
   p++;
@@ -428,7 +521,7 @@ static int prefilter_object(const char* input, size_t length) {
   while (p < end) {
     p = skip_ws(p, end);
     if (p >= end) { return -1; }
-    if (*p == '}') { p++; break; }
+    if (*p == '}') { p++; *endptr = p; goto eval; }
 
     const char* key_start = NULL;
     size_t key_len = 0;
@@ -450,17 +543,34 @@ static int prefilter_object(const char* input, size_t length) {
       // Skip unknown keys
       if (!skip_value(&p, end)) { return -1; }
     }
+    ${allSeenCheck}
 
     p = skip_ws(p, end);
     if (p >= end) { return -1; }
 
     if (*p == ',') { p++; continue; }
-    if (*p == '}') { p++; break; }
+    if (*p == '}') { p++; *endptr = p; goto eval; }
     return -1;
   }
+  return -1;
 
+eval:
   ${predicateEval}
   return 1;
+
+fail_early:
+  {
+    const char* rest = skip_object_rest(p, end, _nest_depth);
+    if (!rest) { return -1; }
+    *endptr = rest;
+    return 0;
+  }
+}
+
+// Per-object prefilter. Thin wrapper around prefilter_object_ex.
+static int prefilter_object(const char* input, size_t length) {
+  const char* endptr = NULL;
+  return prefilter_object_ex(input, input + length, &endptr);
 }
 
 // Single-object entry point (backwards compatible).
@@ -495,7 +605,8 @@ int prefilter_ndjson(const char* input, size_t input_len, uint32_t* output, size
     if (line_len == 0) { continue; }
 
     total++;
-    int result = prefilter_object(line_start, line_len);
+    int result;
+    ${memmemGuard || "result = prefilter_object(line_start, line_len);"}
 
     if (result != 0) {
       if ((size_t)count >= max_matches) { return -1; }
@@ -511,7 +622,7 @@ int prefilter_ndjson(const char* input, size_t input_len, uint32_t* output, size
   return count;
 }
 
-// JSON array batch entry point.
+// JSON array batch entry point (single-pass via prefilter_object_ex).
 // Scans a top-level JSON array of objects. For each matching object, writes (offset, length)
 // pair into the output buffer. Returns number of matching items, or -1 on error/overflow.
 int prefilter_json_array(const char* input, size_t input_len, uint32_t* output, size_t output_capacity) {
@@ -534,49 +645,20 @@ int prefilter_json_array(const char* input, size_t input_len, uint32_t* output, 
     if (*p != '{') { return -1; }
 
     const char* obj_start = p;
-    int depth = 0;
-    bool in_string = false;
-    bool escape = false;
-    const char* scan = p;
-    while (scan < end) {
-      char c = *scan;
-      if (in_string) {
-        if (escape) {
-          escape = false;
-        } else if (c == '\\') {
-          escape = true;
-        } else if (c == '"') {
-          in_string = false;
-        }
-        scan++;
-        continue;
-      }
-      if (c == '"') {
-        in_string = true;
-        scan++;
-        continue;
-      }
-      if (c == '{') {
-        depth++;
-        scan++;
-        continue;
-      }
-      if (c == '}') {
-        depth--;
-        scan++;
-        if (depth == 0) { break; }
-        continue;
-      }
-      scan++;
+    const char* endptr = NULL;
+    int result = prefilter_object_ex(p, end, &endptr);
+
+    if (result == -1) {
+      // Unknown/parse error - fall back to boundary detection for this object,
+      // then treat it as a match (include in output for safety).
+      const char* fallback = obj_start;
+      if (!skip_nested_value(&fallback, end)) { return -1; }
+      endptr = fallback;
     }
 
-    if (depth != 0) { return -1; }
-
-    size_t obj_len = (size_t)(scan - obj_start);
-    p = scan;
+    size_t obj_len = (size_t)(endptr - obj_start);
+    p = endptr;
     total++;
-
-    int result = prefilter_object(obj_start, obj_len);
 
     if (result != 0) {
       if ((size_t)count >= max_matches) { return -1; }
@@ -663,11 +745,11 @@ function renderNestedDescentInner(node: FieldNode, plan: PrefilterPlan, depth: n
 
   const innerMatching = renderNodeMatching(node, plan, depth);
 
-  return `p++; // skip '{'
+  return `_nest_depth++; p++; // skip '{'
         while (p < end) {
             p = skip_ws(p, end);
             if (p >= end) { return -1; }
-            if (*p == '}') { p++; break; }
+            if (*p == '}') { p++; _nest_depth--; break; }
 
             const char* ${keyVar} = NULL;
             size_t ${keyLenVar} = 0;
@@ -690,7 +772,7 @@ function renderNestedDescentInner(node: FieldNode, plan: PrefilterPlan, depth: n
             p = skip_ws(p, end);
             if (p >= end) { return -1; }
             if (*p == ',') { p++; continue; }
-            if (*p == '}') { p++; break; }
+            if (*p == '}') { p++; _nest_depth--; break; }
             return -1;
         }`;
 }
@@ -739,11 +821,11 @@ function renderPredicateValueCheck(
   valueType: "string" | "number" | "boolean" | "null"
 ): string {
   const tag = `p${index}`;
-  const seen = `${tag}_seen = 1;`;
+  const seen = `if (!${tag}_seen) { seen_count++; } ${tag}_seen = 1;`;
   // Mandatory predicates can trigger early-exit on failure.
   // "ne" and "notIn" are soft - missing field means pass, so no early-exit on fail.
   const isMandatory = pred.op !== "ne" && pred.op !== "notIn";
-  const earlyExit = isMandatory ? `if (!${tag}_pass) { return 0; }` : "";
+  const earlyExit = isMandatory ? `if (!${tag}_pass) { goto fail_early; }` : "";
 
   if (pred.op === "isNull") {
     return `

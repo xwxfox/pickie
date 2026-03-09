@@ -25,6 +25,7 @@ export type PrefilterPredicate = {
 };
 
 export type PrefilterPlan = {
+    estimatedSelectivity?: number;
     fields: ReadonlyArray<string>;
     key: string;
     predicates: ReadonlyArray<PrefilterPredicate>;

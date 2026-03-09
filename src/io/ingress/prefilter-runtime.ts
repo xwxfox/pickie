@@ -29,6 +29,10 @@ function releaseOutputBuffer(buf: Uint32Array): void {
 }
 
 
+// Selectivity threshold: if estimated match rate is above this, skip prefiltering
+// and fall back to bulk JSON.parse (which is faster when most items match).
+const SELECTIVITY_THRESHOLD = 0.5;
+
 export function applyNdjsonPrefilter(
     line: string,
     options?: PrefilterStreamOptions
@@ -64,6 +68,10 @@ export function batchPrefilterNdjson(
         return null;
     }
     const plan = options.prefilter;
+    // Skip prefilter when estimated selectivity is high - bulk parse is faster
+    if (plan.estimatedSelectivity != null && plan.estimatedSelectivity > SELECTIVITY_THRESHOLD) {
+        return null;
+    }
     const stats = options.stats;
     const program = options.prefilterProgram ?? getPrefilterProgram(plan);
     const planId = options.planId ?? "";
@@ -124,6 +132,10 @@ export function applyJsonArrayPrefilter(
         return null;
     }
     const plan = options.prefilter;
+    // Skip prefilter when estimated selectivity is high - bulk parse is faster
+    if (plan.estimatedSelectivity != null && plan.estimatedSelectivity > SELECTIVITY_THRESHOLD) {
+        return null;
+    }
     const stats = options.stats;
     const program = options.prefilterProgram ?? getPrefilterProgram(plan);
     const planId = options.planId ?? "";

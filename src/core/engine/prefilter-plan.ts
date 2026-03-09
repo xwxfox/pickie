@@ -87,6 +87,8 @@ function buildPrefilterPlan<T extends Record<string, unknown>>(
     const predicates: Array<PrefilterPredicate> = [];
     const fields: Array<string> = [];
     const seenFields = new Set<string>();
+    let estimatedSelectivity = 1;
+    let hasSelectivity = false;
 
     for (let i = 0; i < specs.length; i++) {
         const spec = specs[i]!;
@@ -101,11 +103,16 @@ function buildPrefilterPlan<T extends Record<string, unknown>>(
                 fields.push(predicate.field);
             }
         }
+        // Accumulate selectivity from each contributing spec
+        if (spec.selectivity != null && spec.selectivity > 0) {
+            estimatedSelectivity *= spec.selectivity;
+            hasSelectivity = true;
+        }
     }
 
     if (predicates.length === 0) {return null;}
     const key = `pf:${predicates.map(formatPredicateKey).join("|")}`;
-    return { fields, key, predicates };
+    return { estimatedSelectivity: hasSelectivity ? estimatedSelectivity : undefined, fields, key, predicates };
 }
 
 function toPrefilterPredicate<T>(spec: PredicateSpec<T>): PrefilterPredicate | Array<PrefilterPredicate> | null {

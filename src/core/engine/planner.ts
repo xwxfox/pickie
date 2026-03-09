@@ -394,7 +394,7 @@ function buildDiagnostics<T extends Record<string, unknown>>(
 }
 
 function stripAnalysis<T>(spec: AnalyzedPredicate<T>): PredicateSpec<T> {
-    const { cost, selectivity, ...rest } = spec;
+    const { cost, ...rest } = spec;
     return rest;
 }
 

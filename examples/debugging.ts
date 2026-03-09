@@ -110,7 +110,7 @@ if (import.meta.main) {
 
 
 /*
-$ bun run examples/debugging.ts 
+$ bun run examples/debugging.ts
 [execution.input]<ID: plan_4__t0>:
 {
   predicates: [
@@ -123,7 +123,7 @@ $ bun run examples/debugging.ts
       pushdown: true,
       reorderable: true,
       selectivity: 0.001,
-      value: [ "Alice" ],
+      value: [ "Eli" ],
     }, {
       cost: 1.1,
       field: "score",
@@ -214,7 +214,7 @@ $ bun run examples/debugging.ts
       pushdown: true,
       reorderable: true,
       selectivity: 0.1,
-      value: "Alice",
+      value: "Eli",
     }, {
       cost: 2.6,
       field: "created",
@@ -261,7 +261,7 @@ $ bun run examples/debugging.ts
       pushdown: true,
       reorderable: true,
       selectivity: 0.1,
-      value: "Alice",
+      value: "Eli",
     }, {
       cost: 2.6,
       field: "created",
@@ -332,15 +332,15 @@ $ bun run examples/debugging.ts
   hasOrders: true,
   hasSearch: false,
   residualPredicates: 1,
-  resultCount: 22164,
+  resultCount: 22331,
 }
-Query took 398.016342ms - sizes: input=150000, res=22164
+Query took 244.07642499999997ms - sizes: input=150000, res=22331
 
 
 Run Report [plan_4__t0]
 Summary
-- duration: 392.53ms
-- output: 22164
+- duration: 239.31ms
+- output: 22331
 - mode: async
 - path: local
 - streaming: false
@@ -348,52 +348,58 @@ Summary
 - orders: true
 
 Timing Hotspots (ms)
-- run.execute: total=392.53 avg=392.53 count=1
-- egress.executeAsync: total=391.99 avg=391.99 count=1
-- execution.executeAsync: total=366.19 avg=366.19 count=1
-- execution.load.materialize: total=296.28 avg=296.28 count=1
-- egress.finalizeOrder: total=24.46 avg=24.46 count=1
-- execution.compilePlan: total=3.13 avg=3.13 count=1
-- execution.optimizePlan: total=2.69 avg=2.69 count=1
-- execution.mergePass: total=0.92 avg=0.92 count=1
-- execution.orderPass: total=0.09 avg=0.09 count=1
-- execution.pushdownSplit: total=0.09 avg=0.09 count=1
+- run.execute: total=239.31 avg=239.31 count=1
+- egress.executeAsync: total=238.81 avg=238.81 count=1
+- execution.executeAsync: total=223.44 avg=223.44 count=1
+- execution.load.materialize: total=195.44 avg=195.44 count=1
+- ingress.prefilter.ffi: total=131.39 avg=131.39 count=1
+- ingress.prefilter.parse: total=36.07 avg=36.07 count=1
+- ingress.file.read: total=17.59 avg=17.59 count=1
+- egress.finalizeOrder: total=13.92 avg=13.92 count=1
+- ingress.prefilter.assemble: total=9.47 avg=9.47 count=1
+- ingress.prefilter.compile: total=8.37 avg=8.37 count=1
 
 Predicate Hotspots (ms)
-- notNull: total=13.53 avg=0.00009 count=150000
-- eq: total=11.35 avg=0.00010 count=114961
-- gt: total=7.08 avg=0.00005 count=145161
-- dateBetween: total=4.77 avg=0.00021 count=23006
+- dateBetween: total=3.07 avg=0.00014 count=22331
+- notNull: total=2.42 avg=0.00011 count=22331
+- eq: total=2.09 avg=0.00009 count=22331
+- gt: total=1.43 avg=0.00006 count=22331
 
 Trace
 - source.create: 0.00ms [ingress]
 - builder.create: 0.00ms [engine]
 - egress.start: 0.00ms [egress]
-- execution.compilePlan: 3.13ms [plan_4__t0]
-  - execution.optimizePlan: 2.69ms [plan_4__t0]
-    - execution.mergePass: 0.92ms [plan_4__t0]
+- execution.compilePlan: 2.71ms [plan_4__t0]
+  - execution.optimizePlan: 2.39ms [plan_4__t0]
+    - execution.mergePass: 0.81ms [plan_4__t0]
     - execution.orderPass: 0.09ms [plan_4__t0]
     - execution.pushdownSplit: 0.09ms [plan_4__t0]
-- run.execute: 392.53ms [plan_4__t0]
+- run.execute: 239.31ms [plan_4__t0]
   - egress.executeResult: 0.05ms [plan_4__t0]
     - egress.execute.start: 0.00ms [plan_4__t0]
     - egress.mergeFilters: 0.00ms [plan_4__t0]
-  - egress.executeAsync: 391.99ms [plan_4__t0]
+  - egress.executeAsync: 238.81ms [plan_4__t0]
     - egress.execute.start: 0.00ms [plan_4__t0]
-    - execution.executeAsync: 366.19ms [plan_4__t0]
+    - execution.executeAsync: 223.44ms [plan_4__t0]
       - execution.execute.start: 0.00ms [plan_4__t0]
       - ingress.planIngress: 0.08ms [ingress]
       - ingress.plan.start: 0.00ms [ingress]
-      - execution.load.materialize: 296.28ms [plan_4__t0]
+      - ingress.prefilter.plan: 0.34ms [plan_4__t0]
+      - ingress.prefilter.compile: 8.37ms [plan_4__t0]
+      - execution.load.materialize: 195.44ms [plan_4__t0]
+        - ingress.file.read: 17.59ms [plan_4__t0]
+        - ingress.prefilter.ffi: 131.39ms [plan_4__t0]
+        - ingress.prefilter.assemble: 9.47ms [plan_4__t0]
+        - ingress.prefilter.parse: 36.07ms [plan_4__t0]
       - execution.execute.end: 0.00ms [plan_4__t0]
-    - egress.finalizeOrder: 24.46ms [plan_4__t0]
+    - egress.finalizeOrder: 13.92ms [plan_4__t0]
     - egress.result.final: 0.00ms [plan_4__t0]
 
 Predicate Metrics
-- notNull: count=150000 total=13.53ms avg=0.00009ms
-- gt: count=145161 total=7.08ms avg=0.00005ms
-- eq: count=114961 total=11.35ms avg=0.00010ms
-- dateBetween: count=23006 total=4.77ms avg=0.00021ms
+- notNull: count=22331 total=2.42ms avg=0.00011ms
+- gt: count=22331 total=1.43ms avg=0.00006ms
+- eq: count=22331 total=2.09ms avg=0.00009ms
+- dateBetween: count=22331 total=3.07ms avg=0.00014ms
 
 Plan Predicate Counts
 - notNull: 1
@@ -405,6 +411,6 @@ Decisions
 - execution [plan_4__t0]: {"costByOp":{"in":1.57,"gt":1.1,"notNull":0.9,"dateBetween":2.6},"mergeCount":0,"predicateCountsByKind":{"builtin":4},"pushdownCount":3,"residualCount":1}
 - ingress [ingress]: {"reason":"ordering/grouping","strategy":"eager","supported":{"group":false,"order":false}}
 - execution [plan_4__t0]: {"phase":"executeAsync"}
+- ingress [plan_4__t0]: {"prefilterChecked":150000,"prefilterMatched":22331,"prefilterParsed":22331,"prefilterSkipped":127669,"prefilterUnknown":0,"prefilterFields":4,"prefilterPredicates":5,"phase":"executeAsync.materialize"}
 - egress [plan_4__t0]: {"path":"local","hasOrders":true,"hasSearch":false,"limit":null,"offset":0}
-
 */
