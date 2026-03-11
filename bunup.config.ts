@@ -13,31 +13,27 @@ export default defineConfig({
     minifySyntax: true,
     minifyWhitespace: true,
     unused: true,
+    banner: `/* You can import the TS source directly with --> import { thing } from "pickie/src"; <-- if thats more your style :3 */\n`,
     exports: {
         customExports: () => ({
             "./package.json": "./package.json",
-            "./smol": {
-                "import": {
-                    "types": "./dist/index.d.ts",
-                    "default": "./dist/index.js",
-                }
-            },
-            ".": {
+            "./tsconfig.json": "./tsconfig.json",
+            "./src": {
                 "import": {
                     "types": "./src/index.ts",
                     "default": "./src/index.ts",
                     "bun": "./src/index.ts"
                 }
+            },
+            ".": {
+                "import": {
+                    "types": "./dist/index.d.ts",
+                    "default": "./dist/index.js",
+                }
             }
         }),
     },
     sourcemap: false,
-    onSuccess: async () => {
-        const pkgJson = await Bun.file("./package.json").json() as { version: string, types: string, module: string };
-        pkgJson.types = "./src/index.ts";
-        pkgJson.module = "./src/index.ts";
-        await Bun.write("./package.json", JSON.stringify(pkgJson, null, 2));
-    }
 }) as DefineConfigItem
 
 

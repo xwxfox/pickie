@@ -11,7 +11,7 @@ import {
   fileSource,
   formatRunReport
 } from "@/index.ts";
-import { resolve } from "path";
+import { resolve } from "node:path";
 
 type LargeItem = {
   active: boolean;
@@ -65,7 +65,7 @@ export const run = async () => {
   const source = fileSource<LargeItem>(resolve(import.meta.dir, "../perf/bench-data/large-items/150000.json"),
     {
       format: "json",
-      hints: { estimatedCount: 150000 },
+      hints: { estimatedCount: 150_000 },
       schema: Schema.inline<LargeItem>(),
       prefilterMode: "auto"
     });

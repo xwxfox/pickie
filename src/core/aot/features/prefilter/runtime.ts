@@ -1,12 +1,12 @@
 import { ptr } from "bun:ffi";
-import type { PrefilterStreamOptions } from "@/io/ingress/prefilter";
-import { createPrefilterStats } from "@/io/ingress/prefilter-utils";
-import { getPrefilterProgram, runPrefilter } from "@/io/ingress/prefilter-c";
 import { startTiming, endTiming } from "@/core/engine/telemetry";
+import { createPrefilterStats } from "./stats";
+import { getPrefilterProgram, runPrefilter } from "./aot";
+import type { PrefilterProgram } from "./aot";
+import type { PrefilterStreamOptions } from "./types";
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
-
 
 const INITIAL_OUTPUT_SLOTS = 4096; // 4096 uint32 values = 2048 match slots
 const MAX_POOL_SIZE = 4;
@@ -28,41 +28,40 @@ function releaseOutputBuffer(buf: Uint32Array): void {
     }
 }
 
-
 // Selectivity threshold: if estimated match rate is above this, skip prefiltering
 // and fall back to bulk JSON.parse (which is faster when most items match).
 const SELECTIVITY_THRESHOLD = 0.5;
 
 export function applyNdjsonPrefilter(
     line: string,
-    options?: PrefilterStreamOptions
+    options?: PrefilterStreamOptions<PrefilterProgram>
 ): boolean {
     if (!options?.prefilter || options.prefilterMode === "off") {
         return true;
     }
     const plan = options.prefilter;
     const stats = options.stats;
-    stats && (stats.checked += 1);
+    if (stats) { stats.checked += 1; }
     const bytes = encoder.encode(line);
-    const program = options.prefilterProgram ?? getPrefilterProgram(plan);
+    const program = options.prefilterProgram ?? getPrefilterProgram(plan, { planId: options.planId, timingParent: options.timingParent ?? null });
     const result = runPrefilter(program, bytes);
     if (result < 0) {
-        stats && (stats.unknown += 1);
-        stats && (stats.parsed += 1);
+        if (stats) { stats.unknown += 1; }
+        if (stats) { stats.parsed += 1; }
         return true;
     }
     if (result === 0) {
-        stats && (stats.skipped += 1);
+        if (stats) { stats.skipped += 1; }
         return false;
     }
-    stats && (stats.matched += 1);
-    stats && (stats.parsed += 1);
+    if (stats) { stats.matched += 1; }
+    if (stats) { stats.parsed += 1; }
     return true;
 }
 
 export function batchPrefilterNdjson(
     bytes: Uint8Array,
-    options?: PrefilterStreamOptions
+    options?: PrefilterStreamOptions<PrefilterProgram>
 ): Array<string> | null {
     if (!options?.prefilter || options.prefilterMode === "off") {
         return null;
@@ -73,7 +72,7 @@ export function batchPrefilterNdjson(
         return null;
     }
     const stats = options.stats;
-    const program = options.prefilterProgram ?? getPrefilterProgram(plan);
+    const program = options.prefilterProgram ?? getPrefilterProgram(plan, { planId: options.planId, timingParent: options.timingParent ?? null });
     const planId = options.planId ?? "";
     const tp = options.timingParent ?? null;
 
@@ -123,10 +122,9 @@ export function batchPrefilterNdjson(
     }
 }
 
-
 export function applyJsonArrayPrefilter(
     bytes: Uint8Array,
-    options?: PrefilterStreamOptions
+    options?: PrefilterStreamOptions<PrefilterProgram>
 ): Array<Record<string, unknown>> | null {
     if (!options?.prefilter || options.prefilterMode === "off") {
         return null;
@@ -137,7 +135,7 @@ export function applyJsonArrayPrefilter(
         return null;
     }
     const stats = options.stats;
-    const program = options.prefilterProgram ?? getPrefilterProgram(plan);
+    const program = options.prefilterProgram ?? getPrefilterProgram(plan, { planId: options.planId, timingParent: options.timingParent ?? null });
     const planId = options.planId ?? "";
     const tp = options.timingParent ?? null;
 

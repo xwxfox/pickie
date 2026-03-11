@@ -1,13 +1,15 @@
 import type { QueryPlan, PredicateSpec } from "@/core/engine/plan";
-import type { PrefilterPlan, PrefilterPredicate, PrefilterStats, PrefilterStreamOptions } from "@/io/ingress/prefilter";
+import type { PrefilterPlan, PrefilterPredicate, PrefilterStats, PrefilterStreamOptions } from "@/core/aot/features/prefilter";
 import { emitMetrics, startTiming, endTiming } from "@/core/engine/telemetry";
+import type { AOTTracer } from "@/core/aot";
+import { getPlannerTimingEnabled } from "@/core/engine/planner-logger";
 import type { TimingToken } from "@/core/engine/telemetry";
-import { createPrefilterStats } from "@/io/ingress/prefilter-utils";
-import { getPrefilterProgram } from "@/io/ingress/prefilter-c";
+import { createPrefilterStats } from "@/core/aot/features/prefilter";
+import { getPrefilterProgram } from "@/core/aot/features/prefilter";
 
 export type PrefilterContext = {
     plan: PrefilterPlan;
-    program: import("@/io/ingress/prefilter-c").PrefilterProgram;
+    program: import("@/core/aot/features/prefilter").PrefilterProgram;
     stats: PrefilterStats;
     streamOptions: PrefilterStreamOptions;
 };
@@ -22,7 +24,7 @@ export function createPrefilterContext<T extends Record<string, unknown>>(
     if (!prefilter) {return null;}
     const compileTiming = startTiming("ingress", "ingress.prefilter.compile", plan.id, timingParent ?? null);
     const stats = createPrefilterStats();
-    const program = getPrefilterProgram(prefilter);
+    const program = getPrefilterProgram(prefilter, buildPrefilterAotOptions(plan.id, timingParent ?? null));
     endTiming(compileTiming, { skipData: true });
     return {
         plan: prefilter,
@@ -36,6 +38,17 @@ export function createPrefilterContext<T extends Record<string, unknown>>(
             stats,
         },
     };
+}
+
+function buildPrefilterAotOptions(planId: string, timingParent: TimingToken | null) {
+    if (!getPlannerTimingEnabled()) {
+        return { planId, timingParent };
+    }
+    const tracer: AOTTracer<TimingToken> = {
+        start: startTiming,
+        end: endTiming,
+    };
+    return { planId, timingParent, tracer };
 }
 
 export function emitPrefilterMetrics(

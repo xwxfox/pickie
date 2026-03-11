@@ -1,7 +1,7 @@
 import { describe, expect, it } from "bun:test";
-import { getPrefilterProgram, runPrefilter } from "@/io/ingress/prefilter-c";
-import { batchPrefilterNdjson, applyJsonArrayPrefilter } from "@/io/ingress/prefilter-runtime";
-import type { PrefilterPlan } from "@/io/ingress/prefilter";
+import { getPrefilterProgram, runPrefilter } from "@/core/aot/features/prefilter";
+import { batchPrefilterNdjson, applyJsonArrayPrefilter } from "@/core/aot/features/prefilter";
+import type { PrefilterPlan } from "@/core/aot/features/prefilter";
 
 describe("Prefilter C runtime", () => {
     const plan: PrefilterPlan = {

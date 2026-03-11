@@ -169,7 +169,7 @@ export class AsyncIngressEngine<T extends Record<string, unknown>> {
         public readonly schema?: Schema<T>
     ) { }
 
-    async materialize(options?: import("@/io/ingress/prefilter").PrefilterStreamOptions): Promise<ReadonlyArray<T>> {
+    async materialize(options?: import("@/core/aot/features/prefilter").PrefilterStreamOptions): Promise<ReadonlyArray<T>> {
         if (this.source.materialize) {
             return this.source.materialize(options);
         }
@@ -180,7 +180,7 @@ export class AsyncIngressEngine<T extends Record<string, unknown>> {
         return items;
     }
 
-    stream(options?: import("@/io/ingress/prefilter").PrefilterStreamOptions): AsyncIterable<T> {
+    stream(options?: import("@/core/aot/features/prefilter").PrefilterStreamOptions): AsyncIterable<T> {
         return this.source.stream(options);
     }
 

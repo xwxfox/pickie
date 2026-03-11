@@ -1,6 +1,6 @@
 import type { Schema } from "@/io/schema";
 import type { IngressCapabilities, IngressHints, AsyncIngressSource } from "@/io/ingress/types";
-import { applyJsonArrayPrefilter } from "@/io/ingress/prefilter-runtime";
+import { applyJsonArrayPrefilter } from "@/core/aot/features/prefilter";
 import { AsyncQueue, isRecord } from "@/io/ingress/utils";
 import { startTiming, endTiming } from "@/core/engine/telemetry";
 
@@ -44,7 +44,7 @@ export type HttpIngressOptions<T extends Record<string, unknown>> = {
 export function httpSource<T extends Record<string, unknown>>(
     options: HttpIngressOptions<T>
 ): AsyncIngressSource<T> {
-    const stream = (streamOptions?: import("@/io/ingress/prefilter").PrefilterStreamOptions) => streamApi<T>(options.behavior, mergePrefilterOptions(streamOptions, options.prefilterMode));
+    const stream = (streamOptions?: import("@/core/aot/features/prefilter").PrefilterStreamOptions) => streamApi<T>(options.behavior, mergePrefilterOptions(streamOptions, options.prefilterMode));
     const materialize = async () => {
         const items: Array<T> = [];
         for await (const item of stream()) {
@@ -64,7 +64,7 @@ export function httpSource<T extends Record<string, unknown>>(
 
 async function* streamApi<T extends Record<string, unknown>>(
     behavior: ApiBehavior<T>,
-    options?: import("@/io/ingress/prefilter").PrefilterStreamOptions
+    options?: import("@/core/aot/features/prefilter").PrefilterStreamOptions
 ): AsyncIterable<T> {
     const queue = new AsyncQueue<T>();
     const pending = (async () => {
@@ -144,9 +144,9 @@ async function* streamApi<T extends Record<string, unknown>>(
 }
 
 function mergePrefilterOptions(
-    options: import("@/io/ingress/prefilter").PrefilterStreamOptions | undefined,
+    options: import("@/core/aot/features/prefilter").PrefilterStreamOptions | undefined,
     mode: "auto" | "off" | undefined
-): import("@/io/ingress/prefilter").PrefilterStreamOptions | undefined {
+): import("@/core/aot/features/prefilter").PrefilterStreamOptions | undefined {
     if (!mode || mode === "auto") {return options;}
     return { ...options, prefilterMode: mode };
 }

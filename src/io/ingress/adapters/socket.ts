@@ -1,8 +1,8 @@
 import type { Socket } from "bun";
 import type { Schema } from "@/io/schema";
 import type { IngressCapabilities, IngressHints, AsyncIngressSource } from "@/io/ingress/types";
-import type { PrefilterStreamOptions } from "@/io/ingress/prefilter";
-import { applyNdjsonPrefilter } from "@/io/ingress/prefilter-runtime";
+import type { PrefilterStreamOptions } from "@/core/aot/features/prefilter";
+import { applyNdjsonPrefilter } from "@/core/aot/features/prefilter";
 import { AsyncQueue, LineDecoder, isRecord } from "@/io/ingress/utils";
 
 export type SocketIngressOptions<T extends Record<string, unknown>> = {

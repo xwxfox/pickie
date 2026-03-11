@@ -67,7 +67,7 @@ describe("Prefilter engine parity", () => {
     });
 
     it("handles escaped strings", () => {
-        const item = JSON.parse('{"name":"a\\"b"}') as BaseItem;
+        const item = JSON.parse(String.raw`{"name":"a\"b"}`) as BaseItem;
         const result = Engine.from(IngressEngine.from([item]))
             .equals("name", "a\"b")
             .out()

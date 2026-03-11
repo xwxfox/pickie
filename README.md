@@ -37,7 +37,7 @@ note: this is built for bun + typescript, zero runtime deps.
 ## owo
 
 ```ts
-import { Engine, IngressEngine } from ".";
+import { Engine, IngressEngine } from "pickie";
 
 const result = Engine.from(IngressEngine.from(data))
   .equals("meta.owner.name", "Alice")
@@ -326,14 +326,6 @@ IngressEngine.configure({
 - `maxPathCache` -> cap for dot-path cache
 
 `IngressEngine.clearCaches()` clears shared caches manually if needed.
-
-
-
-## run tests
-
-```sh
-bun test
-```
 
 
 

@@ -41,10 +41,10 @@ export type AsyncIngressSource<T extends Record<string, unknown>> = {
     capabilities?: Partial<IngressCapabilities>;
     close?: () => void | Promise<void>;
     hints?: IngressHints<T>;
-    materialize?: (options?: import("@/io/ingress/prefilter").PrefilterStreamOptions) => Promise<ReadonlyArray<T>>;
+    materialize?: (options?: import("@/core/aot/features/prefilter").PrefilterStreamOptions) => Promise<ReadonlyArray<T>>;
     mode: "async";
     schema?: Schema<T>;
-    stream: (options?: import("@/io/ingress/prefilter").PrefilterStreamOptions) => AsyncIterable<T>;
+    stream: (options?: import("@/core/aot/features/prefilter").PrefilterStreamOptions) => AsyncIterable<T>;
     pushdown?: (query: PushdownQuery) => AsyncIterable<T> | null;
 };
 

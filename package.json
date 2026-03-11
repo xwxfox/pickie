@@ -1,28 +1,30 @@
 {
   "name": "pickie",
   "description": "smol lil filter engine focussing on perf optimizations and nice sugary DX for arrays of structured objects.",
-  "version": "0.0.4",
+  "version": "0.0.5",
   "type": "module",
   "files": [
     "./src/*.ts",
     "./src/**/*.ts",
-    "dist"
+    "dist",
+    "tsconfig.json"
   ],
-  "module": "./src/index.ts",
-  "types": "./src/index.ts",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
   "exports": {
     ".": {
+      "import": {
+        "types": "./dist/index.d.ts",
+        "default": "./dist/index.js"
+      }
+    },
+    "./package.json": "./package.json",
+    "./tsconfig.json": "./tsconfig.json",
+    "./src": {
       "import": {
         "types": "./src/index.ts",
         "default": "./src/index.ts",
         "bun": "./src/index.ts"
-      }
-    },
-    "./package.json": "./package.json",
-    "./smol": {
-      "import": {
-        "types": "./dist/index.d.ts",
-        "default": "./dist/index.js"
       }
     }
   },

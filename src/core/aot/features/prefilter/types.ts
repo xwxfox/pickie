@@ -1,3 +1,5 @@
+import type { PrefilterProgram } from "./aot";
+
 export type PrefilterMode = "auto" | "off";
 
 export type PrefilterOp =
@@ -39,8 +41,8 @@ export type PrefilterStats = {
     unknown: number;
 };
 
-export type PrefilterStreamOptions = {
-    prefilterProgram?: import("@/io/ingress/prefilter-c").PrefilterProgram | null;
+export type PrefilterStreamOptions<Program = PrefilterProgram> = {
+    prefilterProgram?: Program | null;
     stats?: PrefilterStats;
     planId?: string;
     prefilter?: PrefilterPlan | null;

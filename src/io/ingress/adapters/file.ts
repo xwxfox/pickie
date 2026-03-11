@@ -1,7 +1,7 @@
 import type { Schema } from "@/io/schema";
 import type { IngressCapabilities, IngressHints, AsyncIngressSource } from "@/io/ingress/types";
-import type { PrefilterStreamOptions } from "@/io/ingress/prefilter";
-import { batchPrefilterNdjson, applyJsonArrayPrefilter } from "@/io/ingress/prefilter-runtime";
+import type { PrefilterStreamOptions } from "@/core/aot/features/prefilter";
+import { batchPrefilterNdjson, applyJsonArrayPrefilter } from "@/core/aot/features/prefilter";
 import { isRecord } from "@/io/ingress/utils";
 import { startTiming, endTiming } from "@/core/engine/telemetry";
 

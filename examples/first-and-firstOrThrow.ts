@@ -70,7 +70,7 @@ try {
         .out()
         .firstOrThrow();
     console.dir(result, { depth: null });
-} catch (err) {
+} catch (error) {
     console.error("Error thrown as expected for non-existent ID:");
-    console.error(err);
+    console.error(error);
 }
