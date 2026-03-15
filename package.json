@@ -1,11 +1,12 @@
 {
   "name": "pickie",
   "description": "smol lil filter engine focussing on perf optimizations and nice sugary DX for arrays of structured objects.",
-  "version": "0.0.5",
+  "version": "0.0.6",
   "type": "module",
   "files": [
     "./src/*.ts",
     "./src/**/*.ts",
+    "./src/**/*.c",
     "dist",
     "tsconfig.json"
   ],

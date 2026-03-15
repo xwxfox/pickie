@@ -44,8 +44,13 @@ export type PrefilterStats = {
 export type PrefilterStreamOptions<Program = PrefilterProgram> = {
     prefilterProgram?: Program | null;
     stats?: PrefilterStats;
+    trace?: PrefilterTraceOptions;
     planId?: string;
     prefilter?: PrefilterPlan | null;
     prefilterMode?: PrefilterMode;
     timingParent?: number | null;
+};
+
+export type PrefilterTraceOptions = {
+    enabled: boolean;
 };

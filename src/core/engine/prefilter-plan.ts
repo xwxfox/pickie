@@ -2,7 +2,7 @@ import type { QueryPlan, PredicateSpec } from "@/core/engine/plan";
 import type { PrefilterPlan, PrefilterPredicate, PrefilterStats, PrefilterStreamOptions } from "@/core/aot/features/prefilter";
 import { emitMetrics, startTiming, endTiming } from "@/core/engine/telemetry";
 import type { AOTTracer } from "@/core/aot";
-import { getPlannerTimingEnabled } from "@/core/engine/planner-logger";
+import { getPlannerTimingEnabled, getPlannerDeepMetricsEnabled } from "@/core/engine/planner-logger";
 import type { TimingToken } from "@/core/engine/telemetry";
 import { createPrefilterStats } from "@/core/aot/features/prefilter";
 import { getPrefilterProgram } from "@/core/aot/features/prefilter";
@@ -36,6 +36,7 @@ export function createPrefilterContext<T extends Record<string, unknown>>(
             prefilterProgram: program,
             prefilterMode: "auto",
             stats,
+            trace: getPlannerDeepMetricsEnabled() ? { enabled: true } : undefined,
         },
     };
 }
@@ -48,7 +49,7 @@ function buildPrefilterAotOptions(planId: string, timingParent: TimingToken | nu
         start: startTiming,
         end: endTiming,
     };
-    return { planId, timingParent, tracer };
+    return { planId, timingParent, tracer, trace: getPlannerDeepMetricsEnabled() };
 }
 
 export function emitPrefilterMetrics(

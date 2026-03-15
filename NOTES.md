@@ -1,3 +1,8 @@
+# stuff left to optimize
+Build more "safe" predicates in prefilter, so we can move more logic away from js and into C - though i gotta make sure that the things i add to C behaves exactly how it does in JS so we dont have any mismatches between the two which would cause confusion.
+
+Possibly move sorting / ordering to C as well, as in js it currently takes ~15ms for ~45k items (150k before prefilter)
+
 # March 5, 2026
 Considering tradeoffs and possibilities / when to reach for bun:ffi c compiled queries
 

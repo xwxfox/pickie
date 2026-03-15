@@ -17,17 +17,18 @@ export type RedisIngressOptions<T extends Record<string, unknown>> = {
 
 const defaultParse = <T extends Record<string, unknown>>(value: string): T | null => {
     const parsed = JSON.parse(value);
-    if (!isRecord(parsed)) {return null;}
+    if (!isRecord(parsed)) { return null; }
     return parsed as T;
 };
 
 export function redisSource<T extends Record<string, unknown>>(
     options: RedisIngressOptions<T>
 ): AsyncIngressSource<T> {
+
     const stream = (_options?: import("@/core/aot/features/prefilter").PrefilterStreamOptions) => streamRedis<T>(options);
     const materialize = async () => {
         const items: Array<T> = [];
-        for await (const item of stream()) {items.push(item);}
+        for await (const item of stream()) { items.push(item); }
         return items as ReadonlyArray<T>;
     };
     return {
@@ -65,9 +66,9 @@ async function* streamRedis<T extends Record<string, unknown>>(
                 const values = await options.redis.mget(...keys);
                 for (let i = 0; i < values.length; i++) {
                     const value = values[i];
-                    if (value == null) {continue;}
+                    if (value == null) { continue; }
                     const parsed = parse(value);
-                    if (parsed) {queue.push(parsed);}
+                    if (parsed) { queue.push(parsed); }
                     if (limit > 0) {
                         total += 1;
                         if (total >= limit) {
@@ -77,7 +78,7 @@ async function* streamRedis<T extends Record<string, unknown>>(
                     }
                 }
             }
-            if (nextCursor === "0") {break;}
+            if (nextCursor === "0") { break; }
             cursor = nextCursor;
         }
         queue.close();
@@ -94,8 +95,8 @@ function pushdownRedis<T extends Record<string, unknown>>(
     query: PushdownQuery
 ): AsyncIterable<T> | null {
     const limit = query.limit ?? options.limit ?? 0;
-    if (query.offset && query.offset > 0) {return null;}
-    if (query.orders && query.orders.length > 0) {return null;}
-    if (query.predicates && query.predicates.length > 0) {return null;}
+    if (query.offset && query.offset > 0) { return null; }
+    if (query.orders && query.orders.length > 0) { return null; }
+    if (query.predicates && query.predicates.length > 0) { return null; }
     return streamRedis({ ...options, limit });
 }

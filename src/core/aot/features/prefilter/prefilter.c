@@ -33,6 +33,33 @@
 #define PF_PREDICATE_EVAL /* empty */
 #endif
 
+// PF_TRACE_DECL can inject additional includes and tracing helpers.
+#ifndef PF_TRACE_DECL
+#define PF_TRACE_DECL /* empty */
+#endif
+
+#ifndef PF_TRACE_INIT
+#define PF_TRACE_INIT /* empty */
+#endif
+
+#ifndef PF_TRACE_FLUSH
+#define PF_TRACE_FLUSH /* empty */
+#endif
+
+#ifndef PF_TRACE_START
+#define PF_TRACE_START(_id) /* empty */
+#endif
+
+#ifndef PF_TRACE_END
+#define PF_TRACE_END(_id) /* empty */
+#endif
+
+#ifndef PF_TRACE_COUNT
+#define PF_TRACE_COUNT(_id) /* empty */
+#endif
+
+PF_TRACE_DECL
+
 static inline int is_space(char c) {
   return c == ' ' || c == '\n' || c == '\r' || c == '\t';
 }
@@ -43,30 +70,44 @@ static const char* skip_ws(const char* p, const char* end) {
 }
 
 static int scan_string(const char** pptr, const char* end, const char** out, size_t* out_len, bool* needs_unescape) {
+  PF_TRACE_COUNT(0);
+  PF_TRACE_START(0);
   const char* p = *pptr;
-  if (p >= end || *p != '"') { return 0; }
+  if (p >= end || *p != '"') { PF_TRACE_END(0); return 0; }
   p++;
   const char* start = p;
+  const char* search = p;
   bool escape = false;
-  while (p < end) {
-    char c = *p;
-    if (c == '\\') {
-      escape = true;
-      p++;
-      if (p >= end) { return 0; }
-      p++;
-      continue;
-    }
-    if (c == '"') {
+  while (search < end) {
+    const char* quote = (const char*)memchr(search, '"', (size_t)(end - search));
+    if (!quote) { PF_TRACE_END(0); return 0; }
+    const char* backslash = (const char*)memchr(search, '\\', (size_t)(quote - search));
+    if (!backslash) {
       *out = start;
-      *out_len = (size_t)(p - start);
+      *out_len = (size_t)(quote - start);
       *needs_unescape = escape;
-      p++;
+      p = quote + 1;
       *pptr = p;
+      PF_TRACE_END(0);
       return 1;
     }
-    p++;
+    escape = true;
+    // If the quote is escaped, skip past it and continue search.
+    int slash_count = 0;
+    const char* b = quote;
+    while (b > start && *(b - 1) == '\\') { slash_count++; b--; }
+    if ((slash_count & 1) == 0) {
+      *out = start;
+      *out_len = (size_t)(quote - start);
+      *needs_unescape = true;
+      p = quote + 1;
+      *pptr = p;
+      PF_TRACE_END(0);
+      return 1;
+    }
+    search = quote + 1;
   }
+  PF_TRACE_END(0);
   return 0;
 }
 
@@ -131,12 +172,14 @@ static int unescape_string(const char* input, size_t len, char* output, size_t* 
 // Hand-rolled fast number parser. Parses integer part via multiply-add,
 // only falls back to float arithmetic when '.' or 'e'/'E' is seen.
 static int parse_number(const char** pptr, const char* end, double* out) {
+  PF_TRACE_COUNT(1);
+  PF_TRACE_START(1);
   const char* p = *pptr;
-  if (p >= end) { return 0; }
+  if (p >= end) { PF_TRACE_END(1); return 0; }
 
   int negative = 0;
   if (*p == '-') { negative = 1; p++; }
-  if (p >= end || (*p < '0' || *p > '9')) { return 0; }
+  if (p >= end || (*p < '0' || *p > '9')) { PF_TRACE_END(1); return 0; }
 
   // Integer part via multiply-add
   int64_t int_part = 0;
@@ -154,7 +197,7 @@ static int parse_number(const char** pptr, const char* end, double* out) {
   if (p < end && *p == '.') {
     has_frac = 1;
     p++;
-    if (p >= end || *p < '0' || *p > '9') { return 0; }
+    if (p >= end || *p < '0' || *p > '9') { PF_TRACE_END(1); return 0; }
     double frac_scale = 0.1;
     while (p < end && *p >= '0' && *p <= '9') {
       frac_part += (*p - '0') * frac_scale;
@@ -171,7 +214,7 @@ static int parse_number(const char** pptr, const char* end, double* out) {
     int exp_neg = 0;
     if (p < end && *p == '+') { p++; }
     else if (p < end && *p == '-') { exp_neg = 1; p++; }
-    if (p >= end || *p < '0' || *p > '9') { return 0; }
+    if (p >= end || *p < '0' || *p > '9') { PF_TRACE_END(1); return 0; }
     while (p < end && *p >= '0' && *p <= '9') {
       exp_val = exp_val * 10 + (*p - '0');
       p++;
@@ -206,12 +249,50 @@ static int parse_number(const char** pptr, const char* end, double* out) {
   if (negative) { result = -result; }
   *out = result;
   *pptr = p;
+  PF_TRACE_END(1);
+  return 1;
+}
+
+// Number scanner used when we only need to skip a numeric value.
+// Mirrors parse_number grammar without computing a double.
+static int skip_number(const char** pptr, const char* end) {
+  PF_TRACE_COUNT(2);
+  PF_TRACE_START(2);
+  const char* p = *pptr;
+  if (p >= end) { PF_TRACE_END(2); return 0; }
+
+  if (*p == '-') { p++; }
+  if (p >= end || (*p < '0' || *p > '9')) { PF_TRACE_END(2); return 0; }
+
+  if (*p == '0') {
+    p++;
+  } else {
+    while (p < end && *p >= '0' && *p <= '9') { p++; }
+  }
+
+  if (p < end && *p == '.') {
+    p++;
+    if (p >= end || *p < '0' || *p > '9') { PF_TRACE_END(2); return 0; }
+    while (p < end && *p >= '0' && *p <= '9') { p++; }
+  }
+
+  if (p < end && (*p == 'e' || *p == 'E')) {
+    p++;
+    if (p < end && (*p == '+' || *p == '-')) { p++; }
+    if (p >= end || *p < '0' || *p > '9') { PF_TRACE_END(2); return 0; }
+    while (p < end && *p >= '0' && *p <= '9') { p++; }
+  }
+
+  *pptr = p;
+  PF_TRACE_END(2);
   return 1;
 }
 
 static int skip_nested_value(const char** pptr, const char* end) {
+  PF_TRACE_COUNT(3);
+  PF_TRACE_START(3);
   const char* p = *pptr;
-  if (p >= end || (*p != '{' && *p != '[')) { return 0; }
+  if (p >= end || (*p != '{' && *p != '[')) { PF_TRACE_END(3); return 0; }
   char stack[64];
   int top = 0;
   stack[top++] = (*p == '{') ? '}' : ']';
@@ -237,75 +318,89 @@ static int skip_nested_value(const char** pptr, const char* end) {
       continue;
     }
     if (c == '{' || c == '[') {
-      if (top >= (int)(sizeof(stack) / sizeof(stack[0]))) { return 0; }
+      if (top >= (int)(sizeof(stack) / sizeof(stack[0]))) { PF_TRACE_END(3); return 0; }
       stack[top++] = (c == '{') ? '}' : ']';
       p++;
       continue;
     }
     if (c == '}' || c == ']') {
-      if (top == 0 || c != stack[top - 1]) { return 0; }
+      if (top == 0 || c != stack[top - 1]) { PF_TRACE_END(3); return 0; }
       top--;
       p++;
       if (top == 0) {
         *pptr = p;
+        PF_TRACE_END(3);
         return 1;
       }
       continue;
     }
     p++;
   }
+  PF_TRACE_END(3);
   return 0;
 }
 
 static int skip_value(const char** pptr, const char* end) {
+  PF_TRACE_COUNT(4);
+  PF_TRACE_START(4);
   const char* p = *pptr;
-  if (p >= end) { return 0; }
+  if (p >= end) { PF_TRACE_END(4); return 0; }
   if (*p == '"') {
     const char* value_start = NULL; size_t value_len = 0; bool needs_unescape = false;
-    if (!scan_string(&p, end, &value_start, &value_len, &needs_unescape)) { return 0; }
+    if (!scan_string(&p, end, &value_start, &value_len, &needs_unescape)) { PF_TRACE_END(4); return 0; }
     *pptr = p;
+    PF_TRACE_END(4);
     return 1;
   }
   if (*p == '-' || (*p >= '0' && *p <= '9')) {
-    double number = 0;
-    if (!parse_number(&p, end, &number)) { return 0; }
+    if (!skip_number(&p, end)) { PF_TRACE_END(4); return 0; }
     *pptr = p;
+    PF_TRACE_END(4);
     return 1;
   }
-  if (p + 4 <= end && memcmp(p, "true", 4) == 0) { p += 4; *pptr = p; return 1; }
-  if (p + 5 <= end && memcmp(p, "false", 5) == 0) { p += 5; *pptr = p; return 1; }
-  if (p + 4 <= end && memcmp(p, "null", 4) == 0) { p += 4; *pptr = p; return 1; }
+  if (p + 4 <= end && memcmp(p, "true", 4) == 0) { p += 4; *pptr = p; PF_TRACE_END(4); return 1; }
+  if (p + 5 <= end && memcmp(p, "false", 5) == 0) { p += 5; *pptr = p; PF_TRACE_END(4); return 1; }
+  if (p + 4 <= end && memcmp(p, "null", 4) == 0) { p += 4; *pptr = p; PF_TRACE_END(4); return 1; }
   if (*p == '{' || *p == '[') {
-    if (!skip_nested_value(&p, end)) { return 0; }
+    if (!skip_nested_value(&p, end)) { PF_TRACE_END(4); return 0; }
     *pptr = p;
+    PF_TRACE_END(4);
     return 1;
   }
+  PF_TRACE_END(4);
   return 0;
 }
 
 // Compare a JSON string literal to a target string.
 // Uses byte-level compare when there are no escapes.
 static int match_string(const char* input, size_t len, const char* target, size_t target_len, bool needs_unescape) {
+  PF_TRACE_COUNT(5);
+  PF_TRACE_START(5);
   if (!needs_unescape) {
-    if (len != target_len) { return 0; }
-    return memcmp(input, target, len) == 0 ? 1 : 0;
+    if (len != target_len) { PF_TRACE_END(5); return 0; }
+    int match = memcmp(input, target, len) == 0 ? 1 : 0;
+    PF_TRACE_END(5);
+    return match;
   }
   // Use a stack buffer for small strings, heap for larger values.
   if (len < 256) {
     char buffer[256];
     size_t out_len = 0;
-    if (!unescape_string(input, len, buffer, &out_len)) { return -1; }
-    if (out_len != target_len) { return 0; }
-    return memcmp(buffer, target, out_len) == 0 ? 1 : 0;
+    if (!unescape_string(input, len, buffer, &out_len)) { PF_TRACE_END(5); return -1; }
+    if (out_len != target_len) { PF_TRACE_END(5); return 0; }
+    int match = memcmp(buffer, target, out_len) == 0 ? 1 : 0;
+    PF_TRACE_END(5);
+    return match;
   }
-  if (len > 8192) { return -1; }
+  if (len > 8192) { PF_TRACE_END(5); return -1; }
   char* dyn = (char*)malloc(len + 1);
-  if (!dyn) { return -1; }
+  if (!dyn) { PF_TRACE_END(5); return -1; }
   size_t out_len = 0;
   int ok = unescape_string(input, len, dyn, &out_len);
-  if (!ok) { free(dyn); return -1; }
+  if (!ok) { free(dyn); PF_TRACE_END(5); return -1; }
   int match = (out_len == target_len && memcmp(dyn, target, out_len) == 0) ? 1 : 0;
   free(dyn);
+  PF_TRACE_END(5);
   return match;
 }
 
@@ -313,6 +408,8 @@ static int match_string(const char* input, size_t len, const char* target, size_
 // initial_depth is how many unclosed braces we're inside of.
 // Returns pointer just past the outermost closing '}', or NULL on error.
 static const char* skip_object_rest(const char* p, const char* end, int initial_depth) {
+  PF_TRACE_COUNT(6);
+  PF_TRACE_START(6);
   int depth = initial_depth;
   bool in_string = false;
   bool escape = false;
@@ -330,11 +427,12 @@ static const char* skip_object_rest(const char* p, const char* end, int initial_
     if (c == '}' || c == ']') {
       depth--;
       p++;
-      if (depth == 0) { return p; }
+      if (depth == 0) { PF_TRACE_END(6); return p; }
       continue;
     }
     p++;
   }
+  PF_TRACE_END(6);
   return NULL;
 }
 
@@ -342,8 +440,9 @@ static const char* skip_object_rest(const char* p, const char* end, int initial_
 // On success (return 0 or 1), sets *endptr to position just past the closing '}'.
 // Returns 1 = match, 0 = fail, -1 = unknown (parse required).
 static int prefilter_object_ex(const char* p, const char* end, const char** endptr) {
+  PF_TRACE_START(7);
   p = skip_ws(p, end);
-  if (p >= end || *p != '{') { return -1; }
+  if (p >= end || *p != '{') { PF_TRACE_END(7); return -1; }
   p++;
 
   int _nest_depth = 1;
@@ -351,42 +450,49 @@ static int prefilter_object_ex(const char* p, const char* end, const char** endp
 
   while (p < end) {
     p = skip_ws(p, end);
-    if (p >= end) { return -1; }
+    if (p >= end) { PF_TRACE_END(7); return -1; }
     if (*p == '}') { p++; *endptr = p; goto eval; }
 
     const char* key_start = NULL;
     size_t key_len = 0;
     bool key_needs_unescape = false;
-    if (!scan_string(&p, end, &key_start, &key_len, &key_needs_unescape)) { return -1; }
+    if (!scan_string(&p, end, &key_start, &key_len, &key_needs_unescape)) { PF_TRACE_END(7); return -1; }
     // We don't currently support escaped keys.
-    if (key_needs_unescape) { return -1; }
+    if (key_needs_unescape) { PF_TRACE_END(7); return -1; }
     p = skip_ws(p, end);
-    if (p >= end || *p != ':') { return -1; }
+    if (p >= end || *p != ':') { PF_TRACE_END(7); return -1; }
     p++;
     p = skip_ws(p, end);
 
-    if (p >= end) { return -1; }
+    if (p >= end) { PF_TRACE_END(7); return -1; }
     int handled = 0;
 
+    PF_TRACE_COUNT(8);
+    PF_TRACE_START(8);
     PF_ROOT_MATCHING
+    PF_TRACE_END(8);
 
     if (!handled) {
       // Skip unknown keys
-      if (!skip_value(&p, end)) { return -1; }
+      if (!skip_value(&p, end)) { PF_TRACE_END(7); return -1; }
     }
     PF_ALL_SEEN_CHECK
 
     p = skip_ws(p, end);
-    if (p >= end) { return -1; }
+    if (p >= end) { PF_TRACE_END(7); return -1; }
 
     if (*p == ',') { p++; continue; }
     if (*p == '}') { p++; *endptr = p; goto eval; }
+    PF_TRACE_END(7);
     return -1;
   }
+  PF_TRACE_END(7);
   return -1;
 
 eval:
   PF_PREDICATE_EVAL
+  PF_TRACE_END(7);
+  PF_TRACE_FLUSH;
   return 1;
 
 fail_early:
@@ -394,6 +500,8 @@ fail_early:
     const char* rest = skip_object_rest(p, end, _nest_depth);
     if (!rest) { return -1; }
     *endptr = rest;
+    PF_TRACE_END(7);
+    PF_TRACE_FLUSH;
     return 0;
   }
 }
@@ -405,18 +513,21 @@ static int prefilter_object(const char* input, size_t length) {
 }
 
 // Single-object entry point (backwards compatible).
-int prefilter(const char* input, size_t length) {
+int prefilter(const char* input, size_t length, void* trace_ptr) {
+  PF_TRACE_INIT;
   return prefilter_object(input, length);
 }
 
 // NDJSON batch entry point.
 // Scans newline-delimited JSON. For each matching object, writes (offset, length) pair
 // into the output buffer. Returns number of matching items, or -1 on error/overflow.
-int prefilter_ndjson(const char* input, size_t input_len, uint32_t* output, size_t output_capacity) {
+int prefilter_ndjson(const char* input, size_t input_len, uint32_t* output, size_t output_capacity, void* trace_ptr) {
+  PF_TRACE_INIT;
   if (output_capacity < 4) { return -1; } // need at least header + 1 match slot
   size_t max_matches = (output_capacity - 2) / 2;
   int32_t count = 0;
   int32_t total = 0;
+  int32_t unknown = 0;
   const char* p = input;
   const char* end = input + input_len;
 
@@ -440,6 +551,8 @@ int prefilter_ndjson(const char* input, size_t input_len, uint32_t* output, size
     PF_MEMMEM_GUARD
     PF_MEMMEM_FALLBACK
 
+    if (result < 0) { unknown++; }
+
     if (result != 0) {
       if ((size_t)count >= max_matches) { return -1; }
       uint32_t offset = (uint32_t)(line_start - input);
@@ -450,18 +563,20 @@ int prefilter_ndjson(const char* input, size_t input_len, uint32_t* output, size
   }
 
   output[0] = (uint32_t)total;
-  output[1] = 0;
+  output[1] = (uint32_t)unknown;
   return count;
 }
 
 // JSON array batch entry point (single-pass via prefilter_object_ex).
 // Scans a top-level JSON array of objects. For each matching object, writes (offset, length)
 // pair into the output buffer. Returns number of matching items, or -1 on error/overflow.
-int prefilter_json_array(const char* input, size_t input_len, uint32_t* output, size_t output_capacity) {
+int prefilter_json_array(const char* input, size_t input_len, uint32_t* output, size_t output_capacity, void* trace_ptr) {
+  PF_TRACE_INIT;
   if (output_capacity < 4) { return -1; }
   size_t max_matches = (output_capacity - 2) / 2;
   int32_t count = 0;
   int32_t total = 0;
+  int32_t unknown = 0;
   const char* p = input;
   const char* end = input + input_len;
 
@@ -481,6 +596,7 @@ int prefilter_json_array(const char* input, size_t input_len, uint32_t* output, 
     int result = prefilter_object_ex(p, end, &endptr);
 
     if (result == -1) {
+      unknown++;
       // Unknown/parse error - fall back to boundary detection for this object,
       // then treat it as a match (include in output for safety).
       const char* fallback = obj_start;
@@ -508,6 +624,6 @@ int prefilter_json_array(const char* input, size_t input_len, uint32_t* output, 
   }
 
   output[0] = (uint32_t)total;
-  output[1] = 0;
+  output[1] = (uint32_t)unknown;
   return count;
 }

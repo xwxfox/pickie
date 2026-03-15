@@ -42,9 +42,9 @@ function buildTemplateSnippet(
 }
 
 type PrefilterSymbols = {
-    prefilter: { args: ["ptr", "usize"]; returns: "i32" };
-    prefilter_ndjson: { args: ["ptr", "usize", "ptr", "usize"]; returns: "i32" };
-    prefilter_json_array: { args: ["ptr", "usize", "ptr", "usize"]; returns: "i32" };
+    prefilter: { args: ["ptr", "usize", "ptr"]; returns: "i32" };
+    prefilter_ndjson: { args: ["ptr", "usize", "ptr", "usize", "ptr"]; returns: "i32" };
+    prefilter_json_array: { args: ["ptr", "usize", "ptr", "usize", "ptr"]; returns: "i32" };
 };
 
 export type PrefilterProgram = {
@@ -59,6 +59,7 @@ export type PrefilterProgramOptions = {
     planId?: string;
     timingParent?: number | AOTTimingTokenLike | null;
     tracer?: AOTTracer<AOTTimingTokenLike>;
+    trace?: boolean;
 };
 
 type PrefilterCacheEntry = {
@@ -88,7 +89,7 @@ const requiredMarkers = [
 ];
 
 export function getPrefilterProgram(plan: PrefilterPlan, options?: PrefilterProgramOptions): PrefilterProgram {
-    const key = plan.key;
+    const key = `${plan.key}:${options?.trace ? "trace" : "notrace"}`;
     const cached = programCache.get(key);
     if (cached && !cached.closed) {
         return cached.program;
@@ -98,7 +99,7 @@ export function getPrefilterProgram(plan: PrefilterPlan, options?: PrefilterProg
     }
     const planId = options?.planId ?? key;
     const aot = new AOTProgram<PrefilterSymbols, AOTTimingTokenLike>({ tracer: options?.tracer, traceSource: "ingress" });
-    const template = buildPrefilterTemplate(plan);
+    const template = buildPrefilterTemplate(plan, { trace: options?.trace ?? false });
     const filename = `prefilter-${key.replaceAll(/[^a-zA-Z0-9_-]/g, "_")}-${Date.now()}.c`;
     const path = `/tmp/pickie/${filename}`;
     const compiled = aot.compile(template, {
@@ -108,15 +109,15 @@ export function getPrefilterProgram(plan: PrefilterPlan, options?: PrefilterProg
         flags: ["-O3"],
         symbols: {
             prefilter: {
-                args: ["ptr", "usize"],
+                args: ["ptr", "usize", "ptr"],
                 returns: "i32",
             },
             prefilter_ndjson: {
-                args: ["ptr", "usize", "ptr", "usize"],
+                args: ["ptr", "usize", "ptr", "usize", "ptr"],
                 returns: "i32",
             },
             prefilter_json_array: {
-                args: ["ptr", "usize", "ptr", "usize"],
+                args: ["ptr", "usize", "ptr", "usize", "ptr"],
                 returns: "i32",
             },
         } satisfies PrefilterSymbols,
@@ -154,13 +155,14 @@ export function getPrefilterProgram(plan: PrefilterPlan, options?: PrefilterProg
     return program;
 }
 
-export function runPrefilter(program: PrefilterProgram, bytes: Uint8Array): number {
+export function runPrefilter(program: PrefilterProgram, bytes: Uint8Array, traceBuffer?: BigUint64Array | null): number {
     const entry = programEntries.get(program);
     if (entry?.closed) {
         return -1;
     }
     const pointer = ptr(bytes);
-    return program.fn(pointer, bytes.byteLength);
+    const tracePointer = traceBuffer ? ptr(traceBuffer) : null;
+    return program.fn(pointer, bytes.byteLength, tracePointer);
 }
 
 export async function disposePrefilterProgram(program: PrefilterProgram): Promise<void> {
@@ -209,19 +211,22 @@ function removeFromCacheOrder(key: string): void {
 type FieldNode = {
     children: Map<string, FieldNode>;
     predicateIndices: Array<number>;
+    maxKeyLen: number;
 };
 
 function buildFieldTree(plan: PrefilterPlan): FieldNode {
-    const root: FieldNode = { children: new Map(), predicateIndices: [] };
+    const root: FieldNode = { children: new Map(), predicateIndices: [], maxKeyLen: 0 };
     for (let i = 0; i < plan.predicates.length; i++) {
         const pred = plan.predicates[i]!;
         const segs = pred.segments ? pred.segments : [pred.field];
         let node = root;
         for (let s = 0; s < segs.length - 1; s++) {
             const seg = segs[s]!;
+            const segLen = encoder.encode(seg).length;
+            if (segLen > node.maxKeyLen) { node.maxKeyLen = segLen; }
             let child = node.children.get(seg);
             if (!child) {
-                child = { children: new Map(), predicateIndices: [] };
+                child = { children: new Map(), predicateIndices: [], maxKeyLen: 0 };
                 node.children.set(seg, child);
             }
             node = child;
@@ -229,10 +234,12 @@ function buildFieldTree(plan: PrefilterPlan): FieldNode {
         const lastSeg = segs.at(-1)!;
         let leaf = node.children.get(lastSeg);
         if (!leaf) {
-            leaf = { children: new Map(), predicateIndices: [] };
+            leaf = { children: new Map(), predicateIndices: [], maxKeyLen: 0 };
             node.children.set(lastSeg, leaf);
         }
         leaf.predicateIndices.push(i);
+        const lastLen = encoder.encode(lastSeg).length;
+        if (lastLen > node.maxKeyLen) { node.maxKeyLen = lastLen; }
     }
     return root;
 }
@@ -266,7 +273,7 @@ function selectMemmemCandidate(plan: PrefilterPlan): { values: Array<string>; pr
     return bestCandidate ? { values: bestCandidate.values, predicateIndex: bestCandidate.predicateIndex } : null;
 }
 
-function buildPrefilterTemplate(plan: PrefilterPlan): AOTTemplate {
+function buildPrefilterTemplate(plan: PrefilterPlan, options?: { trace?: boolean }): AOTTemplate {
     const predicates = plan.predicates;
     const fieldTree = buildFieldTree(plan);
     const numPredicates = predicates.length;
@@ -311,6 +318,10 @@ function buildPrefilterTemplate(plan: PrefilterPlan): AOTTemplate {
     // Optimization #2: early exit check after each key-value pair
     const allSeenCheck = `if (seen_count >= ${numPredicates}) {\n  const char* rest = skip_object_rest(p, end, 1);\n  if (!rest) { return -1; }\n  *endptr = rest;\n  goto eval;\n}`;
 
+    const trace = options?.trace === true;
+    const traceDecl = trace
+        ? `#include <time.h>\ntypedef struct { uint64_t counts[9]; uint64_t nanos[9]; } pf_trace_t;\nstatic pf_trace_t* __pf_trace = NULL;\nstatic inline uint64_t pf_now() { struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts); return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec; }\nstatic inline void pf_trace_add(pf_trace_t* trace, int idx, uint64_t elapsed) { if (!trace) { return; } trace->nanos[idx] += elapsed; }\nstatic inline void pf_trace_count(pf_trace_t* trace, int idx) { if (!trace) { return; } trace->counts[idx]++; }\n#undef PF_TRACE_INIT\n#undef PF_TRACE_START\n#undef PF_TRACE_END\n#undef PF_TRACE_COUNT\n#undef PF_TRACE_FLUSH\n#define PF_TRACE_INIT do { __pf_trace = (pf_trace_t*)trace_ptr; } while (0)\n#define PF_TRACE_START(_id) uint64_t __pf_tstart_##_id = __pf_trace ? pf_now() : 0;\n#define PF_TRACE_END(_id) do { if (__pf_trace) { pf_trace_add(__pf_trace, _id, pf_now() - __pf_tstart_##_id); } } while (0)\n#define PF_TRACE_COUNT(_id) do { if (__pf_trace) { pf_trace_count(__pf_trace, _id); } } while (0)\n#define PF_TRACE_FLUSH do { } while (0)`
+        : "";
     const markers = [
         { name: "PF_PREDICATE_STATE", replaceWith: indentBlock(predicateState, 2) },
         { name: "PF_ROOT_MATCHING", replaceWith: indentBlock(rootMatching, 4) },
@@ -318,6 +329,7 @@ function buildPrefilterTemplate(plan: PrefilterPlan): AOTTemplate {
         { name: "PF_MEMMEM_FALLBACK", replaceWith: indentBlock(memmemFallback, 4) },
         { name: "PF_ALL_SEEN_CHECK", replaceWith: indentBlock(allSeenCheck, 4) },
         { name: "PF_PREDICATE_EVAL", replaceWith: indentBlock(predicateEval, 2) },
+        { name: "PF_TRACE_DECL", replaceWith: traceDecl },
     ];
 
     return {
@@ -342,40 +354,65 @@ function renderNodeMatching(node: FieldNode, plan: PrefilterPlan, depth: number)
     const keyLenVar = depth === 0 ? "key_len" : `key${depth}_len`;
     const handledVar = depth === 0 ? "handled" : `handled${depth}`;
 
-    const branches = entries.map(([key, child]) => {
-        const keyBytes = encoder.encode(key);
-        const keyLiteral = bytesToCString(keyBytes);
-        const keyLen = keyBytes.length;
+    const groups = new Map<number, Array<{ key: string; child: FieldNode }>>();
+    for (const [key, child] of entries) {
+        const keyLen = encoder.encode(key).length;
+        const bucket = groups.get(keyLen) ?? [];
+        bucket.push({ key, child });
+        groups.set(keyLen, bucket);
+    }
 
-        const hasPredicates = child.predicateIndices.length > 0;
-        const hasChildren = child.children.size > 0;
+    const lengthCases = Array.from(groups.entries()).sort((a, b) => a[0] - b[0]);
+    const lines: Array<string> = [];
+    if (node.maxKeyLen > 0) {
+        lines.push(`if (${keyLenVar} > ${node.maxKeyLen}) { ${handledVar} = 1; if (!skip_value(&p, end)) { return -1; } } else {`);
+    }
+    lines.push(`switch (${keyLenVar}) {`);
+    for (let i = 0; i < lengthCases.length; i++) {
+        const [length, bucket] = lengthCases[i]!;
+        lines.push(`  case ${length}: {`);
+        const branches = bucket.map(({ key, child }) => {
+            const keyBytes = encoder.encode(key);
+            const keyLiteral = bytesToCString(keyBytes);
 
-        let body: string;
+            const hasPredicates = child.predicateIndices.length > 0;
+            const hasChildren = child.children.size > 0;
 
-        if (hasPredicates && !hasChildren) {
-            // Pure leaf - read value and check predicates
-            body = renderValueReaderByIndices(child.predicateIndices, plan);
-        } else if (!hasPredicates && hasChildren) {
-            // Pure branch - descend into nested object
-            body = renderNestedDescent(child, plan, depth + 1);
-        } else if (hasPredicates && hasChildren) {
-            // Both leaf and branch - rare but possible
-            // If value is '{', descend; otherwise evaluate leaf predicates
-            body = `if (*p == '{') {\n        ${renderNestedDescentInner(child, plan, depth + 1)}\n      } else {\n        ${renderValueReaderByIndicesInline(child.predicateIndices, plan)}\n      }`;
-        } else {
-            body = `if (!skip_value(&p, end)) { return -1; }`;
-        }
+            let body: string;
 
-        const branchBody = body;
-        const snippet = buildTemplateSnippet(nodeBranchTemplate, {
-            "PF_KEY_COND": `(${keyLenVar} == ${keyLen} && memcmp(${keyVar}, "${keyLiteral}", ${keyLen}) == 0)`,
-            "/* PF_HANDLED_SET */": `${handledVar} = 1;`,
-            "/* PF_BRANCH_BODY */": branchBody,
-        });
-        return snippet;
-    }).join(" else ");
+            if (hasPredicates && !hasChildren) {
+                // Pure leaf - read value and check predicates
+                body = renderValueReaderByIndices(child.predicateIndices, plan);
+            } else if (!hasPredicates && hasChildren) {
+                // Pure branch - descend into nested object
+                body = renderNestedDescent(child, plan, depth + 1);
+            } else if (hasPredicates && hasChildren) {
+                // Both leaf and branch - rare but possible
+                // If value is '{', descend; otherwise evaluate leaf predicates
+                body = `if (*p == '{') {\n        ${renderNestedDescentInner(child, plan, depth + 1)}\n      } else {\n        ${renderValueReaderByIndicesInline(child.predicateIndices, plan)}\n      }`;
+            } else {
+                body = `if (!skip_value(&p, end)) { return -1; }`;
+            }
 
-    return branches;
+            const snippet = buildTemplateSnippet(nodeBranchTemplate, {
+                "PF_KEY_COND": `memcmp(${keyVar}, "${keyLiteral}", ${length}) == 0`,
+                "/* PF_HANDLED_SET */": `${handledVar} = 1;`,
+                "/* PF_BRANCH_BODY */": body,
+            });
+            return snippet;
+        }).join(" else ");
+        lines.push(indentBlock(branches, 4));
+        lines.push("    break;");
+        lines.push("  }");
+    }
+    lines.push("  default:");
+    lines.push("    break;");
+    lines.push("}");
+    if (node.maxKeyLen > 0) {
+        lines.push("}");
+    }
+
+    return lines.join("\n");
 }
 
 function renderNestedDescent(node: FieldNode, plan: PrefilterPlan, depth: number): string {
@@ -493,8 +530,16 @@ function renderPredicateValueCheck(
             const checks = literal
                 .map(({ encoded, length }) => `match_string(value_start, value_len, "${encoded}", ${length}, value_needs_unescape) == 1`)
                 .join(" || ");
+            const rawChecks = literal
+                .map(({ encoded, length }) => `(unescape_len == ${length} && memcmp(unescape_ptr, "${encoded}", ${length}) == 0)`)
+                .join(" || ");
+            const slowChecks = checks.length > 0 ? `(${checks})` : "0";
+            const fastChecks = rawChecks.length > 0 ? `(${rawChecks})` : "0";
+            const unescapePath = literal.length > 1
+                ? `int match = 0;\nif (value_needs_unescape) {\n  char stack_buf[256];\n  char* unescape_ptr = stack_buf;\n  size_t unescape_len = 0;\n  int unescape_ok = 0;\n  if (value_len < sizeof(stack_buf)) {\n    unescape_ok = unescape_string(value_start, value_len, stack_buf, &unescape_len);\n  } else if (value_len <= 8192) {\n    unescape_ptr = (char*)malloc(value_len + 1);\n    if (unescape_ptr) {\n      unescape_ok = unescape_string(value_start, value_len, unescape_ptr, &unescape_len);\n    }\n  }\n  if (unescape_ok) {\n    match = ${fastChecks};\n  }\n  if (unescape_ptr != stack_buf) { free(unescape_ptr); }\n} else {\n  match = ${slowChecks};\n}\n${tag}_pass = ${pred.op === "ne" || pred.op === "notIn" ? "!match" : "match"};\n${earlyExit}`
+                : `int match = ${slowChecks};\n${tag}_pass = ${pred.op === "ne" || pred.op === "notIn" ? "!match" : "match"};\n${earlyExit}`;
             return buildTemplateSnippet(predicateCheckTemplate, {
-                "/* PF_PREDICATE_BODY */": `${seen}\nint match = ${checks.length > 0 ? `(${checks})` : "0"};\n${tag}_pass = ${pred.op === "ne" || pred.op === "notIn" ? "!match" : "match"};\n${earlyExit}`,
+                "/* PF_PREDICATE_BODY */": `${seen}\n${unescapePath}`,
             });
         }
         if (pred.type === "number" && valueType === "number") {

@@ -3,6 +3,7 @@ import type { IngressCapabilities, IngressHints, AsyncIngressSource } from "@/io
 import { applyJsonArrayPrefilter } from "@/core/aot/features/prefilter";
 import { AsyncQueue, isRecord } from "@/io/ingress/utils";
 import { startTiming, endTiming } from "@/core/engine/telemetry";
+import { currentRuntime } from "@/util/runtime";
 
 export type ApiPaginationMode = "offset" | "page" | "cursor" | "none";
 
@@ -44,6 +45,11 @@ export type HttpIngressOptions<T extends Record<string, unknown>> = {
 export function httpSource<T extends Record<string, unknown>>(
     options: HttpIngressOptions<T>
 ): AsyncIngressSource<T> {
+    if (options?.prefilterMode !== "off" && currentRuntime !== "bun") {
+        options = { ...options, prefilterMode: "off" };
+        // eslint-disable-next-line no-console
+        console.warn("Prefiltering is only available when using the Bun runtime due to the use of bun:ffi. Disabling prefiltering for this source.");
+    }
     const stream = (streamOptions?: import("@/core/aot/features/prefilter").PrefilterStreamOptions) => streamApi<T>(options.behavior, mergePrefilterOptions(streamOptions, options.prefilterMode));
     const materialize = async () => {
         const items: Array<T> = [];
@@ -66,6 +72,11 @@ async function* streamApi<T extends Record<string, unknown>>(
     behavior: ApiBehavior<T>,
     options?: import("@/core/aot/features/prefilter").PrefilterStreamOptions
 ): AsyncIterable<T> {
+    if (options?.prefilterMode !== "off" && currentRuntime !== "bun") {
+        options = { ...options, prefilterMode: "off" };
+        // eslint-disable-next-line no-console
+        console.warn("Prefiltering is only available when using the Bun runtime due to the use of bun:ffi. Disabling prefiltering for this source.");
+    }
     const queue = new AsyncQueue<T>();
     const pending = (async () => {
         const pageSize = behavior.pagination?.pageSize ?? 100;
@@ -91,18 +102,18 @@ async function* streamApi<T extends Record<string, unknown>>(
             if (!behavior.dataPath && prefiltered && behavior.pagination?.mode !== "cursor") {
                 for (let i = 0; i < prefiltered.length; i++) {
                     const item = prefiltered[i]!;
-                    if (!isRecord(item)) {continue;}
+                    if (!isRecord(item)) { continue; }
                     queue.push(item as T);
                 }
                 const pagination = behavior.pagination?.mode ?? "none";
-                if (pagination === "none") {break;}
+                if (pagination === "none") { break; }
                 if (pagination === "page") {
-                    if (prefiltered.length < pageSize) {break;}
+                    if (prefiltered.length < pageSize) { break; }
                     page += 1;
                     continue;
                 }
                 if (pagination === "offset") {
-                    if (prefiltered.length < pageSize) {break;}
+                    if (prefiltered.length < pageSize) { break; }
                     offset += pageSize;
                     continue;
                 }
@@ -112,23 +123,23 @@ async function* streamApi<T extends Record<string, unknown>>(
             const payload = JSON.parse(new TextDecoder().decode(rawBody)) as unknown;
             endTiming(parseTiming, { skipData: true });
             const items = extractItems<T>(payload, behavior.dataPath);
-            for (let i = 0; i < items.length; i++) {queue.push(items[i]!);}
+            for (let i = 0; i < items.length; i++) { queue.push(items[i]!); }
 
             const pagination = behavior.pagination?.mode ?? "none";
-            if (pagination === "none") {break;}
+            if (pagination === "none") { break; }
             if (pagination === "page") {
-                if (items.length < pageSize) {break;}
+                if (items.length < pageSize) { break; }
                 page += 1;
                 continue;
             }
             if (pagination === "offset") {
-                if (items.length < pageSize) {break;}
+                if (items.length < pageSize) { break; }
                 offset += pageSize;
                 continue;
             }
             if (pagination === "cursor") {
                 const next = resolvePath(payload, behavior.pagination?.nextCursorPath);
-                if (typeof next !== "string" || next.length === 0) {break;}
+                if (typeof next !== "string" || next.length === 0) { break; }
                 cursor = next;
                 continue;
             }
@@ -147,7 +158,7 @@ function mergePrefilterOptions(
     options: import("@/core/aot/features/prefilter").PrefilterStreamOptions | undefined,
     mode: "auto" | "off" | undefined
 ): import("@/core/aot/features/prefilter").PrefilterStreamOptions | undefined {
-    if (!mode || mode === "auto") {return options;}
+    if (!mode || mode === "auto") { return options; }
     return { ...options, prefilterMode: mode };
 }
 
@@ -167,7 +178,7 @@ function buildUrl<T extends Record<string, unknown>>(
     }
     const pagination = behavior.pagination;
     if (pagination) {
-        if (pagination.limitParam) {url.searchParams.set(pagination.limitParam, String(pageSize));}
+        if (pagination.limitParam) { url.searchParams.set(pagination.limitParam, String(pageSize)); }
         if (pagination.mode === "offset" && pagination.offsetParam) {
             url.searchParams.set(pagination.offsetParam, String(offset));
         }
@@ -194,10 +205,10 @@ function buildRequestInit<T extends Record<string, unknown>>(
     }
     const body: Record<string, unknown> = { ...behavior.body };
     const pagination = behavior.pagination;
-    if (pagination?.limitParam) {body[pagination.limitParam] = pageSize;}
-    if (pagination?.mode === "offset" && pagination.offsetParam) {body[pagination.offsetParam] = offset;}
-    if (pagination?.mode === "page" && pagination.pageParam) {body[pagination.pageParam] = page;}
-    if (pagination?.mode === "cursor" && pagination.cursorParam && cursor) {body[pagination.cursorParam] = cursor;}
+    if (pagination?.limitParam) { body[pagination.limitParam] = pageSize; }
+    if (pagination?.mode === "offset" && pagination.offsetParam) { body[pagination.offsetParam] = offset; }
+    if (pagination?.mode === "page" && pagination.pageParam) { body[pagination.pageParam] = page; }
+    if (pagination?.mode === "cursor" && pagination.cursorParam && cursor) { body[pagination.cursorParam] = cursor; }
     return {
         body: JSON.stringify(body),
         headers: { "content-type": "application/json", ...behavior.headers },
@@ -210,23 +221,23 @@ function extractItems<T extends Record<string, unknown>>(
     path?: string
 ): Array<T> {
     const target = resolvePath(payload, path);
-    if (!Array.isArray(target)) {return [] as Array<T>;}
+    if (!Array.isArray(target)) { return [] as Array<T>; }
     const output: Array<T> = [];
     for (let i = 0; i < target.length; i++) {
         const item = target[i];
-        if (!isRecord(item)) {continue;}
+        if (!isRecord(item)) { continue; }
         output.push(item as T);
     }
     return output;
 }
 
 function resolvePath(payload: unknown, path?: string): unknown {
-    if (!path || path.length === 0) {return payload;}
-    if (!isRecord(payload)) {return undefined;}
+    if (!path || path.length === 0) { return payload; }
+    if (!isRecord(payload)) { return undefined; }
     const segments = path.split(".");
     let current: unknown = payload;
     for (let i = 0; i < segments.length; i++) {
-        if (!isRecord(current)) {return undefined;}
+        if (!isRecord(current)) { return undefined; }
         const segment = segments[i]!;
         current = current[segment];
     }

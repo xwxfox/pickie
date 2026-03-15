@@ -4,6 +4,8 @@ import type { PrefilterStreamOptions } from "@/core/aot/features/prefilter";
 import { batchPrefilterNdjson, applyJsonArrayPrefilter } from "@/core/aot/features/prefilter";
 import { isRecord } from "@/io/ingress/utils";
 import { startTiming, endTiming } from "@/core/engine/telemetry";
+import { readFileToArrayBuffer } from "@/util/fs";
+import { currentRuntime } from "@/util/runtime";
 
 export type JsonFileFormat = "json" | "ndjson";
 
@@ -20,6 +22,11 @@ export function fileSource<T extends Record<string, unknown>>(
     options?: FileIngressOptions<T>
 ): AsyncIngressSource<T> {
     const format = options?.format ?? "json";
+    if (options?.prefilterMode !== "off" && currentRuntime !== "bun") {
+        options = { ...options, prefilterMode: "off" };
+        // eslint-disable-next-line no-console
+        console.warn("Prefiltering is only available when using the Bun runtime due to the use of bun:ffi. Disabling prefiltering for this source.");
+    }
     const stream = format === "ndjson"
         ? (streamOptions?: PrefilterStreamOptions) => streamNdjson<T>(path, mergePrefilterOptions(streamOptions, options?.prefilterMode))
         : (streamOptions?: PrefilterStreamOptions) => streamJsonArray<T>(path, mergePrefilterOptions(streamOptions, options?.prefilterMode));
@@ -44,7 +51,7 @@ async function* streamJsonArray<T extends Record<string, unknown>>(
     const tp = options?.timingParent ?? null;
 
     const readTiming = startTiming("ingress", "ingress.file.read", planId, tp);
-    const bytes = new Uint8Array(await Bun.file(path).arrayBuffer());
+    const bytes = new Uint8Array(await readFileToArrayBuffer(path));
     endTiming(readTiming, { skipData: true });
 
     const matched = applyJsonArrayPrefilter(bytes, options);
@@ -77,7 +84,7 @@ async function materializeJsonArray<T extends Record<string, unknown>>(
     const tp = options?.timingParent ?? null;
 
     const readTiming = startTiming("ingress", "ingress.file.read", planId, tp);
-    const bytes = new Uint8Array(await Bun.file(path).arrayBuffer());
+    const bytes = new Uint8Array(await readFileToArrayBuffer(path));
     endTiming(readTiming, { skipData: true });
 
     const matched = applyJsonArrayPrefilter(bytes, options);
@@ -103,12 +110,23 @@ async function materializeNdjson<T extends Record<string, unknown>>(
     const tp = options?.timingParent ?? null;
 
     const readTiming = startTiming("ingress", "ingress.file.read", planId, tp);
-    const bytes = new Uint8Array(await Bun.file(path).arrayBuffer());
+    const bytes = new Uint8Array(await readFileToArrayBuffer(path));
     endTiming(readTiming, { skipData: true });
 
     const matched = batchPrefilterNdjson(bytes, options);
 
     if (matched !== null) {
+        if (currentRuntime === "bun") {
+            const parseTiming = startTiming("ingress", "ingress.json.parse", planId, tp);
+            const output = Bun.JSONL.parse(matched.join("\n")) as Array<T>;
+            const filtered: Array<T> = [];
+            for (let i = 0; i < output.length; i++) {
+                const item = output[i];
+                if (isRecord(item)) { filtered.push(item); }
+            }
+            endTiming(parseTiming, { skipData: true });
+            return filtered;
+        }
         const parseTiming = startTiming("ingress", "ingress.json.parse", planId, tp);
         const output: Array<T> = new Array(matched.length);
         let count = 0;
@@ -143,7 +161,7 @@ async function* streamNdjson<T extends Record<string, unknown>>(
     const tp = options?.timingParent ?? null;
 
     const readTiming = startTiming("ingress", "ingress.file.read", planId, tp);
-    const bytes = new Uint8Array(await Bun.file(path).arrayBuffer());
+    const bytes = new Uint8Array(await readFileToArrayBuffer(path));
     endTiming(readTiming, { skipData: true });
 
     // Try batch prefilter path
@@ -151,6 +169,16 @@ async function* streamNdjson<T extends Record<string, unknown>>(
 
     if (matched !== null) {
         // Batch prefilter succeeded - parse only matched items
+        if (currentRuntime === "bun") {
+            const joined = matched.join("\n");
+            const parsed = Bun.JSONL.parse(joined) as Array<T>;
+            for (let i = 0; i < parsed.length; i++) {
+                const item = parsed[i];
+                if (!isRecord(item)) { continue; }
+                yield item as T;
+            }
+            return;
+        }
         for (let i = 0; i < matched.length; i++) {
             const parsed = JSON.parse(matched[i]!);
             if (!isRecord(parsed)) { continue; }

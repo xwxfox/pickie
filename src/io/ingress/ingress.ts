@@ -31,7 +31,7 @@ function resolveCacheState<T extends Record<string, unknown>>(config?: IngressCo
 
     if (config?.sharedCache ?? getUseSharedCache()) {
         const shared = getSharedCacheState();
-        if (shared) {return shared;}
+        if (shared) { return shared; }
         const created = createCacheState(cacheOptions);
         setSharedCacheState(created);
         return created;
@@ -44,7 +44,7 @@ function mergeHints<T extends Record<string, unknown>>(
     base?: IngressHints<T>,
     incoming?: IngressHints<T>
 ): IngressHints<T> | undefined {
-    if (!base && !incoming) {return undefined;}
+    if (!base && !incoming) { return undefined; }
     return { ...base, ...incoming } as IngressHints<T>;
 }
 
@@ -190,7 +190,7 @@ export class AsyncIngressEngine<T extends Record<string, unknown>> {
 
     isEmpty(): boolean {
         const count = this.source.hints?.estimatedCount;
-        if (count === undefined) {return false;}
+        if (count === undefined) { return false; }
         return count === 0;
     }
 
@@ -205,7 +205,7 @@ export class AsyncIngressEngine<T extends Record<string, unknown>> {
     }
 
     async close(): Promise<void> {
-        if (!this.source.close) {return;}
+        if (!this.source.close) { return; }
         const result = this.source.close();
         if (result instanceof Promise) {
             await result;

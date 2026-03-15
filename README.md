@@ -1,8 +1,9 @@
 # pickie
 
-smol lil filter engine focussing on perf optimizations and nice sugary DX for arrays of *structured* objects.  
-> WIP, but functional. Still trying to find more fast-paths & micro optimizations uwu  
-note: this is built for bun + typescript, zero runtime deps.
+a smol high-performance query engine for structured JSON data for Bun.
+supports filtering, sorting, grouping, searching, tagging, multiple ingress adapters, nice DX, full typesafety for keys & values to help you catch errors before you even compile, 
+
+We internally make use of a few Bun specific things, so it currently will only work in Bun, but - i am working on setting up guards to make it work in other runtimes, and possibly even the browser - though you will always get the best performance in Bun (especially due to major perf wins coming from bun:ffi)
 
 > it is actually quite neat but i hate writing docs so go dig in the code u fkn twink
 
